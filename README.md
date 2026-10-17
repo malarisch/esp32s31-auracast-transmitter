@@ -44,3 +44,6 @@ bricht auf diesem Board nach einigen Sekunden weg (esp-idf#19221).
 |---|---|---|
 | 2026-10-17 | Chip | ESP32-S31 Revision v0.0, 40-MHz-Quarz, CPU 320 MHz (App-Log; esptool nennt 300 MHz) |
 | 2026-10-17 | Flash | 16 MB erkannt. PSRAM ist nicht aktiviert (nicht benötigt), Größe ungeprüft |
+| 2026-10-17 | I2S-Slave-Takt | Braucht die APLL: 2×32 Bit bei 48 kHz verlangen intern ≥ 24,576 MHz mit Teiler ≥ 2, XTAL (40 MHz) reicht nicht |
+| 2026-10-17 | Testton 48002 Hz (XTAL, Teiler 3+88/345 → real +41,74 ppm) | gemessen +41,73 … +41,79 ppm, Töne 440,0/880,0 Hz, kein Überlauf |
+| 2026-10-17 | Testton 47998 Hz (XTAL, Teiler 3+12/47 → real −34,04 ppm) | gemessen −34,03 … −34,07 ppm |
