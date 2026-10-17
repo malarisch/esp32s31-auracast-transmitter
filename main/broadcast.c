@@ -51,6 +51,10 @@ ESP_BLE_AUDIO_BAP_LC3_BROADCAST_PRESET_48_4_1_DEFINE(s_preset, LOCATIONS, ESP_BL
 
 #define STREAM_COUNT 2
 _Static_assert(CONFIG_BT_BAP_BROADCAST_SRC_STREAM_COUNT >= STREAM_COUNT, "need 2 broadcast streams");
+/* Broadcast_Name must be 4..32 bytes (PBP); the code at most 16. Both are copied into fixed buffers. */
+_Static_assert(sizeof(CONFIG_AURACAST_BROADCAST_NAME) - 1 >= 4 && sizeof(CONFIG_AURACAST_BROADCAST_NAME) - 1 <= 32,
+               "AURACAST_BROADCAST_NAME must be 4..32 bytes");
+_Static_assert(sizeof(CONFIG_AURACAST_BROADCAST_CODE) - 1 <= 16, "AURACAST_BROADCAST_CODE must be at most 16 bytes");
 
 static struct {
     esp_ble_audio_bap_stream_t stream;
