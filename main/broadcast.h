@@ -21,6 +21,7 @@ typedef struct {
     uint32_t tick_us_min;     /* window since the last reset */
     uint32_t tick_us_max;
     double tick_us_mean;
+    double bt_ppm;            /* SDU tick rate vs. esp_timer since streaming start (cumulative) */
 } broadcast_stats_t;
 
 /* Creates the broadcast source and starts advertising + BIG. Bluetooth must be initialized. */

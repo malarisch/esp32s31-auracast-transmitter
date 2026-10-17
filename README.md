@@ -35,8 +35,58 @@ idf.py -p $PORT flash
 python tools/serial_log.py --port $PORT --seconds 10 --reset
 ```
 
-Flashen und Logs laufen über den **USB-UART-Port (CP2102N)**. Der USB-Serial/JTAG-Port
+Flashen und Logs laufen über den **USB-UART-Port (CP2102N)** mit **921600 Baud** (`serial_log.py` nutzt das als Default;
+die ROM-Zeilen am Anfang kommen mit 115200 Baud und erscheinen als Zeichensalat — beim Auswerten `grep -a` verwenden). Der USB-Serial/JTAG-Port
 bricht auf diesem Board nach einigen Sekunden weg (esp-idf#19221).
+
+## Konfiguration (menuconfig → *AES67 Auracast bridge*)
+
+| Option | Default | Bedeutung |
+|---|---|---|
+| I2S input → BCLK/WS/DATA GPIO | 40 / 42 / 39 | Pins an J2 |
+| Input FIFO fill set point | 960 Frames (20 ms) | Sollwert des Driftreglers; bestimmt einen Teil der Latenz |
+| Broadcast name | `AES67 Auracast` | Name, den Empfänger anzeigen (Broadcast_Name) |
+| Broadcast code | leer | leer = unverschlüsselt, sonst max. 16 Byte |
+| LC3 broadcast preset | 48_4_1 | 48 kHz, 10 ms, 120 Byte (96 kbit/s pro Kanal); alternativ 48_2_1 / 48_6_1 |
+| TX power | +9 dBm | wird auf die nächstkleinere unterstützte Stufe abgerundet |
+| Audio source | I2S | `SYNTH` = 440/880 Hz direkt, ohne I2S (Empfänger testen) |
+
+## Testbetrieb ohne FPGA
+
+**FPGA vorher abziehen**, sonst treiben zwei Quellen dieselben Pins.
+
+- `Test mode → Generate test tone`: I2S1 erzeugt als Master 440 Hz links / 880 Hz rechts (−12 dBFS)
+  auf den Eingangspins; die I2S0-Eingänge werden intern über die GPIO-Matrix zurückgeführt.
+- `Test tone sample rate`: absichtlich neben 48000 Hz, um Drift zu erzeugen. Der XTAL-Teiler
+  trifft nicht jede Rate exakt: 48002 Hz → real +41,74 ppm, 47998 Hz → real −34,04 ppm,
+  48100 Hz → real +2081 ppm (Fehlerfall „falsche Samplerate“).
+- `Delay before the test tone starts`: prüft den Start mit spätem I2S-Signal.
+- `Switch the test tone off for 2 s every 30 s`: prüft Taktverlust und Wiederanlauf.
+- Im Testbetrieb loggt die Pipeline zusätzlich `tone check (after resampler): L=…Hz R=…Hz`
+  — damit lassen sich Kanalzuordnung und Resampling ohne Empfänger prüfen.
+
+## Statuszeile lesen
+
+Alle 5 s:
+
+```
+pipeline: state=RUN fill=960.0 ppm=+41.62 in_ppm=+41.74 underrun=0 ovf=0 lost=0 senderr=0 wd=1 tick_us=[9824..10249] mean=10000.0 proc_us_max=5261 sent=14389 heap=114316 bt_ppm=+0.41
+```
+
+| Feld | Bedeutung |
+|---|---|
+| `state` | `NO_SIGNAL` (kein I2S-Takt) → `PRIME` (FIFO füllt sich) → `RUN`; `RATE_ERROR` = Eingangsrate außerhalb ±500 ppm (nach 5 s neuer Versuch). Außerhalb von `RUN` wird Stille gesendet. Nach einer Taktlücke startet der Regler mit dem zuletzt gelernten Verhältnis (Warmstart). |
+| `fill` | geschätzter FIFO-Füllstand in Frames, Mittel im 5-s-Fenster (Soll 960) |
+| `ppm` | Resampler-Verhältnis − 1 (Mittel im Fenster): Abweichung des I2S-Takts gegenüber dem Bluetooth-Takt |
+| `in_ppm` | gemessene I2S-Eingangsrate gegenüber `esp_timer`, kumulativ — sollte ≈ `ppm` + `bt_ppm` sein |
+| `underrun` / `ovf` | FIFO leer gelaufen / übergelaufen (jeweils Rückfall nach `PRIME`) |
+| `lost` | Anzahl I2S-Taktverluste im Zustand `RUN` |
+| `senderr` / `wd` | Sendefehler / Watchdog-Nachfüllungen der Controller-Queue |
+| `tick_us` / `mean` | Abstand der SDU-Bestätigungen des Controllers (min..max / Mittel im 5-s-Fenster) |
+| `proc_us_max` | max. Rechenzeit pro SDU-Paar (Resampler + 2 × LC3), Budget 10 000 µs |
+| `sent` | bestätigte SDU-Paare seit Start |
+| `heap` | freier Heap in Byte |
+| `bt_ppm` | Rate der SDU-Ticks gegenüber `esp_timer`, kumulativ seit Streamstart |
 
 ## Messwerte
 
@@ -50,4 +100,17 @@ bricht auf diesem Board nach einigen Sekunden weg (esp-idf#19221).
 | 2026-10-17 | LC3-Encoder, 2 × mono 48 kHz/10 ms/120 B | 6,0 ms aus Flash (DIO) → 4,6 ms (QIO) → 3,0 ms (Code im IRAM, `main/lc3_iram.lf`); ASM-Variante allein bringt nichts |
 | 2026-10-17 | Broadcast, Synth-Quelle, 70 s | Tick-Mittel 10 000,0 µs, Spanne 9,5–10,6 ms (keine Bündelung), senderr=0, wd=0, Rechenzeit max. 3,2 ms/Paar, Heap frei 224 KB |
 | 2026-10-17 | Selbstheilung (jedes 500. Paar nicht gesendet), 60 s | Ticks unverändert 10 000 µs, kein Stillstand, Queue füllt sich beim nächsten Tick wieder auf |
+| 2026-10-17 | Pipeline-Rechenzeit (Resampler + 2 × LC3) | max. 5,6 ms pro 10 ms (Resampler ~2,2 ms nach Umstellung auf Festkomma-Positionen) |
+| 2026-10-17 | Drift 10 min, Testton real +41,74 ppm | durchgehend `RUN`, Füllstand 959,5–960,6, Regler-Mittel +41,75 ppm (5-s-Fenster 40,0–43,8), alle Fehlerzähler 0, Heap ≥ 111 KB |
+| 2026-10-17 | Drift 2 min, Testton real −34,04 ppm | Regler −32,7 … −35,3 ppm, Füllstand 960, alle Fehlerzähler 0 |
+| 2026-10-17 | Start mit 5 s verspätetem I2S-Takt | Broadcast startet in `NO_SIGNAL`, nach Taktbeginn `PRIME → RUN` |
+| 2026-10-17 | Taktlücken (2 s alle 30 s, 4×) | je `RUN → NO_SIGNAL → PRIME → RUN`, `lost` +1, Warmstart mit gelerntem Verhältnis, Ticks lückenlos, kein Reset |
+| 2026-10-17 | Falsche Rate (real +2081 ppm) | `RATE_ERROR` ~13 s nach `RUN`, zyklischer Wiederanlauf ohne Reset, `in_ppm` zeigt +2081 |
 | offen | Hörtest | Braucht einen Auracast-Empfänger (AirPods können kein Auracast) |
+| offen | Betrieb am FPGA | Testton aus, FPGA an J2; `in_ppm`/`ppm` zeigen die reale Abweichung PTP ↔ Modul-Quarz |
+
+## Latenz (geschätzt)
+
+FIFO-Sollwert 20 ms + Resampler 0,7 ms + LC3-Frame 10 ms + LC3-Lookahead ~2,5 ms + Transport ≤ 20 ms
++ Presentation Delay 40 ms ≈ **75–95 ms** Ende-zu-Ende. Kleinere FIFO-Sollwerte senken die Latenz, lassen aber
+weniger Reserve für Jitter.

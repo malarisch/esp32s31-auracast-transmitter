@@ -17,12 +17,17 @@
 #define CUTOFF      0.45    /* normalized to the input rate: 21.6 kHz at 48 kHz */
 #define KAISER_BETA 9.5
 
+/* Q32.32 position: the top log2(PHASES) fraction bits select the phase, the rest interpolate */
+#define PHASE_SHIFT     (32 - 7)
+#define PHASE_FRAC_MASK ((1u << PHASE_SHIFT) - 1u)
+_Static_assert(RESAMPLER_PHASES == 128, "PHASE_SHIFT assumes 128 phases");
+
 struct resampler {
     uint8_t channels;
     uint32_t cap;        /* frames per channel buffer */
     uint32_t fill;       /* frames currently buffered */
-    double pos;          /* position of the next output relative to buf[0] */
-    double ratio;
+    uint64_t pos;        /* Q32.32 position of the next output relative to buf[0] */
+    uint64_t step;       /* Q32.32 ratio (input frames per output frame) */
     float *buf;          /* channels * cap, planar */
     float coef[RESAMPLER_PHASES + 1][RESAMPLER_TAPS];
 };
@@ -83,7 +88,7 @@ resampler_t *resampler_create(uint8_t channels, uint32_t max_out_frames)
         free(rs);
         return NULL;
     }
-    rs->ratio = 1.0;
+    rs->step = (uint64_t)1 << 32;
     build_table(rs);
     resampler_reset(rs);
     return rs;
@@ -102,18 +107,19 @@ void resampler_reset(resampler_t *rs)
     memset(rs->buf, 0, (size_t)rs->channels * rs->cap * sizeof(float));
     /* HALF-1 frames of zero history so the first output's support starts at buf[0] */
     rs->fill = HALF - 1;
-    rs->pos = HALF - 1;
+    rs->pos = (uint64_t)(HALF - 1) << 32;
 }
 
 void resampler_set_ratio(resampler_t *rs, double ratio)
 {
-    rs->ratio = ratio;
+    /* Fixed point keeps double (soft-float on the S31) out of the per-sample path */
+    rs->step = (uint64_t)llround(ratio * 4294967296.0);
 }
 
 /* Buffered frames required to produce outputs up to (and including) position p */
-static uint32_t frames_required(double p)
+static uint32_t frames_required(uint64_t p)
 {
-    return (uint32_t)floor(p) + HALF + 1;
+    return (uint32_t)(p >> 32) + HALF + 1;
 }
 
 uint32_t resampler_input_needed(const resampler_t *rs, uint32_t out_frames)
@@ -121,7 +127,7 @@ uint32_t resampler_input_needed(const resampler_t *rs, uint32_t out_frames)
     if (out_frames == 0) {
         return 0;
     }
-    double last = rs->pos + (double)(out_frames - 1) * rs->ratio;
+    uint64_t last = rs->pos + (uint64_t)(out_frames - 1) * rs->step;
     uint32_t req = frames_required(last);
     uint32_t need = req > rs->fill ? req - rs->fill : 0;
     return need + 1; /* one safety frame against rounding at an integer boundary */
@@ -145,34 +151,31 @@ void resampler_push(resampler_t *rs, const int32_t *in, uint32_t frames)
 
 static int32_t saturate(float y)
 {
-    double v = (double)y * 2147483648.0;
-    if (v >= 2147483647.0) {
+    float v = y * 2147483648.0f;
+    if (v >= 2147483520.0f) {   /* largest float below 2^31 */
         return INT32_MAX;
     }
-    if (v <= -2147483648.0) {
+    if (v <= -2147483648.0f) {
         return INT32_MIN;
     }
-    return (int32_t)lrint(v);
+    return (int32_t)(v >= 0.0f ? v + 0.5f : v - 0.5f);
 }
 
 uint32_t resampler_pull(resampler_t *rs, int32_t *const out[], uint32_t out_frames)
 {
-    const double pos0 = rs->pos;
+    const uint64_t pos0 = rs->pos;
     uint32_t produced = 0;
 
     for (; produced < out_frames; produced++) {
         /* Positions from pos0 by multiplication, consistent with resampler_input_needed() */
-        double p = pos0 + (double)produced * rs->ratio;
+        uint64_t p = pos0 + (uint64_t)produced * rs->step;
         if (frames_required(p) > rs->fill) {
             break;
         }
-        uint32_t i = (uint32_t)floor(p);
-        double phase = (p - i) * RESAMPLER_PHASES;
-        uint32_t ph = (uint32_t)phase;
-        if (ph >= RESAMPLER_PHASES) {
-            ph = RESAMPLER_PHASES - 1;
-        }
-        float a = (float)(phase - ph);
+        uint32_t i = (uint32_t)(p >> 32);
+        uint32_t frac = (uint32_t)p;
+        uint32_t ph = frac >> PHASE_SHIFT;
+        float a = (float)(frac & PHASE_FRAC_MASK) * (1.0f / (float)(PHASE_FRAC_MASK + 1u));
         const float *c0 = rs->coef[ph];
         const float *c1 = rs->coef[ph + 1];
         for (uint8_t ch = 0; ch < rs->channels; ch++) {
@@ -187,8 +190,8 @@ uint32_t resampler_pull(resampler_t *rs, int32_t *const out[], uint32_t out_fram
     }
 
     /* Advance and drop frames no longer needed as history */
-    double p_next = pos0 + (double)produced * rs->ratio;
-    uint32_t drop = (uint32_t)floor(p_next) - (HALF - 1);
+    uint64_t p_next = pos0 + (uint64_t)produced * rs->step;
+    uint32_t drop = (uint32_t)(p_next >> 32) - (HALF - 1);
     if (drop > rs->fill) {
         drop = rs->fill;
     }
@@ -198,7 +201,7 @@ uint32_t resampler_pull(resampler_t *rs, int32_t *const out[], uint32_t out_fram
             memmove(b, b + drop, (rs->fill - drop) * sizeof(float));
         }
         rs->fill -= drop;
-        p_next -= drop;
+        p_next -= (uint64_t)drop << 32;
     }
     rs->pos = p_next;
     return produced;

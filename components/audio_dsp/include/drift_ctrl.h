@@ -51,6 +51,12 @@ double drift_ctrl_ratio(const drift_ctrl_t *c);
 /* (ratio - 1) * 1e6 */
 double drift_ctrl_ppm(const drift_ctrl_t *c);
 
+/* Clock offset learned by the integrator: the ratio without the proportional part */
+double drift_ctrl_learned_ratio(const drift_ctrl_t *c);
+
+/* Warm start: begin from a previously learned ratio instead of 1.0 (call after drift_ctrl_init) */
+void drift_ctrl_preset(drift_ctrl_t *c, double ratio);
+
 /*
  * FIFO fill interpolated between DMA interrupts: ring_count plus the frames that
  * arrived since the last DMA interrupt, clamped to [0, dma_frames].

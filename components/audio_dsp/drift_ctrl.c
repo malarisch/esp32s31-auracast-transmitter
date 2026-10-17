@@ -58,6 +58,17 @@ double drift_ctrl_ppm(const drift_ctrl_t *c)
     return (c->ratio - 1.0) * 1e6;
 }
 
+double drift_ctrl_learned_ratio(const drift_ctrl_t *c)
+{
+    return 1.0 + c->cfg.ki * c->integ;
+}
+
+void drift_ctrl_preset(drift_ctrl_t *c, double ratio)
+{
+    c->integ = (ratio - 1.0) / c->cfg.ki;
+    c->ratio = ratio;
+}
+
 double fill_estimate(uint32_t ring_count, int64_t t_last_isr_us, int64_t t_now_us,
                      double fs_hz, uint32_t dma_frames)
 {

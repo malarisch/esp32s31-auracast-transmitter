@@ -173,6 +173,36 @@ static void test_frame_accounting(void)
     resampler_destroy(rs);
 }
 
+/*
+ * With a ratio that changes every block (as under the PI controller) the input actually
+ * consumed must still equal sum(480 * ratio_b): no frame may be lost or added.
+ */
+static void test_varying_ratio_accounting(void)
+{
+    resampler_t *rs = resampler_create(2, BLOCK);
+    int32_t *const out[2] = {blk_l, blk_r};
+    uint64_t pushed = 0;
+    double expect = 0.0;
+    uint32_t short_pulls = 0;
+    for (uint32_t b = 0; b < 60000; b++) {
+        double r = 1.0 + 40e-6 + 3e-6 * sin(2.0 * M_PI * b / 517.0);
+        resampler_set_ratio(rs, r);
+        uint32_t need = resampler_input_needed(rs, BLOCK);
+        for (uint32_t i = 0; i < 2 * need; i++) {
+            in_buf[i] = 0;
+        }
+        resampler_push(rs, in_buf, need);
+        short_pulls += resampler_pull(rs, out, BLOCK) != BLOCK;
+        pushed += need;
+        expect += BLOCK * r;
+    }
+    printf("  pushed=%llu expected=%.1f diff=%.1f short_pulls=%u\n", (unsigned long long)pushed, expect,
+           (double)pushed - expect, short_pulls);
+    CHECK(short_pulls == 0);
+    CHECK(fabs((double)pushed - expect) <= RESAMPLER_TAPS + 2);
+    resampler_destroy(rs);
+}
+
 static double ratio_toggle(uint32_t b)
 {
     return (b % 2) ? 1.0 + 500e-6 : 1.0 - 500e-6;
@@ -234,6 +264,7 @@ int main(void)
     RUN_TEST(test_sine_18k);
     RUN_TEST(test_input_needed_sufficient);
     RUN_TEST(test_frame_accounting);
+    RUN_TEST(test_varying_ratio_accounting);
     RUN_TEST(test_ratio_toggle_no_jump);
     RUN_TEST(test_fullscale_square_no_wrap);
     TEST_MAIN_RETURN();

@@ -30,9 +30,11 @@ typedef struct {
     double step_at_s;     /* < 0: no step */
     double duration_s;
     uint32_t seed;
+    double preset_ppm;    /* NAN: cold start; otherwise warm start from this learned ratio */
 } sim_cfg_t;
 
 typedef struct {
+    double max_abs_err_ppm;    /* max |ppm - eps| over the whole run (after priming) */
     double final_ppm;          /* mean over the last 10 s */
     double final_fill_err;     /* mean (est - TARGET) over the last 10 s */
     double ppm_pp_last60s;
@@ -53,6 +55,9 @@ static sim_result_t simulate(const sim_cfg_t *cfg)
     drift_ctrl_cfg_t dc = DRIFT_CTRL_CFG_DEFAULT(TARGET);
     drift_ctrl_t c;
     drift_ctrl_init(&c, &dc);
+    if (!isnan(cfg->preset_ppm)) {
+        drift_ctrl_preset(&c, 1.0 + cfg->preset_ppm * 1e-6);
+    }
 
     sim_result_t res = {0};
     res.min_count = INT64_MAX;
@@ -118,6 +123,10 @@ static sim_result_t simulate(const sim_cfg_t *cfg)
         }
 
         double ppm = drift_ctrl_ppm(&c);
+        double eps_now = (cfg->step_at_s >= 0 && t_now >= cfg->step_at_s) ? cfg->eps_ppm_after : cfg->eps_ppm;
+        if (fabs(ppm - eps_now) > res.max_abs_err_ppm) {
+            res.max_abs_err_ppm = fabs(ppm - eps_now);
+        }
         if (t_now > cfg->duration_s - 60.0) {
             if (ppm < ppm_min60) ppm_min60 = ppm;
             if (ppm > ppm_max60) ppm_max60 = ppm;
@@ -140,7 +149,7 @@ static sim_result_t simulate(const sim_cfg_t *cfg)
 
 static void test_converges_plus(void)
 {
-    sim_cfg_t cfg = {41.7, 41.7, -1, 300, 1};
+    sim_cfg_t cfg = {41.7, 41.7, -1, 300, 1, NAN};
     sim_result_t r = simulate(&cfg);
     CHECK(fabs(r.final_ppm - 41.7) < 1.0);
     CHECK(fabs(r.final_fill_err) < 24.0);
@@ -152,7 +161,7 @@ static void test_converges_plus(void)
 
 static void test_converges_minus(void)
 {
-    sim_cfg_t cfg = {-100.0, -100.0, -1, 300, 2};
+    sim_cfg_t cfg = {-100.0, -100.0, -1, 300, 2, NAN};
     sim_result_t r = simulate(&cfg);
     CHECK(fabs(r.final_ppm + 100.0) < 1.0);
     CHECK(r.min_count >= 544);
@@ -162,7 +171,7 @@ static void test_converges_minus(void)
 
 static void test_step(void)
 {
-    sim_cfg_t cfg = {50.0, -50.0, 150.0, 400, 3};
+    sim_cfg_t cfg = {50.0, -50.0, 150.0, 400, 3, NAN};
     sim_result_t r = simulate(&cfg);
     CHECK(fabs(r.final_ppm + 50.0) < 1.0);
     CHECK(r.min_count >= 544);
@@ -172,10 +181,51 @@ static void test_step(void)
 
 static void test_out_of_range(void)
 {
-    sim_cfg_t cfg = {2000.0, 2000.0, -1, 60, 4};
+    sim_cfg_t cfg = {2000.0, 2000.0, -1, 60, 4, NAN};
     sim_result_t r = simulate(&cfg);
     CHECK(r.out_of_range);
     CHECK(r.out_of_range_at_s <= 30.0);
+}
+
+/* A preset ratio is held exactly while the fill sits at the set point */
+static void test_preset_holds_ratio(void)
+{
+    drift_ctrl_cfg_t dc = DRIFT_CTRL_CFG_DEFAULT(TARGET);
+    drift_ctrl_t c;
+    drift_ctrl_init(&c, &dc);
+    drift_ctrl_preset(&c, 1.0 + 41.7e-6);
+    CHECK(drift_ctrl_update(&c, TARGET, TICK_S) == DRIFT_OK);
+    CHECK(fabs(drift_ctrl_ppm(&c) - 41.7) < 1e-6);
+    CHECK(fabs((drift_ctrl_learned_ratio(&c) - 1.0) * 1e6 - 41.7) < 1e-6);
+}
+
+/* The learned ratio excludes the proportional part (a transient fill error) */
+static void test_learned_ratio_excludes_p(void)
+{
+    drift_ctrl_cfg_t dc = DRIFT_CTRL_CFG_DEFAULT(TARGET);
+    drift_ctrl_t c;
+    drift_ctrl_init(&c, &dc);
+    drift_ctrl_preset(&c, 1.0 + 20e-6);
+    drift_ctrl_update(&c, TARGET + 10.0, TICK_S);  /* first update primes the low-pass: e = 10 frames */
+    CHECK(fabs(drift_ctrl_ppm(&c) - (20.0 + 52.0)) < 0.5);                 /* kp * 10 = 52 ppm on top */
+    CHECK(fabs((drift_ctrl_learned_ratio(&c) - 1.0) * 1e6 - 20.0) < 0.2);  /* integral barely moved */
+}
+
+/* Warm start after a gap: no acquisition swing, the loop stays within a few ppm */
+static void test_warm_start_no_transient(void)
+{
+    sim_cfg_t cfg = {41.7, 41.7, -1, 120, 5, 41.7};
+    sim_result_t r = simulate(&cfg);
+    CHECK(r.max_abs_err_ppm < 5.0);
+    CHECK(r.min_count >= 544);
+}
+
+/* Cold start reference: the same run without preset swings much further */
+static void test_cold_start_swings(void)
+{
+    sim_cfg_t cfg = {41.7, 41.7, -1, 120, 5, NAN};
+    sim_result_t r = simulate(&cfg);
+    CHECK(r.max_abs_err_ppm > 20.0);
 }
 
 int main(void)
@@ -185,5 +235,9 @@ int main(void)
     RUN_TEST(test_converges_minus);
     RUN_TEST(test_step);
     RUN_TEST(test_out_of_range);
+    RUN_TEST(test_preset_holds_ratio);
+    RUN_TEST(test_learned_ratio_excludes_p);
+    RUN_TEST(test_warm_start_no_transient);
+    RUN_TEST(test_cold_start_swings);
     TEST_MAIN_RETURN();
 }

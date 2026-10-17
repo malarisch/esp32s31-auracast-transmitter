@@ -75,9 +75,16 @@ Das Projekt ist gescheitert, auch wenn es technisch läuft, wenn
 
 **Broadcast.** Ein BIG mit einer Subgroup und zwei BIS (Front Left, Front Right), Preset LC3 48_4_1 (48 kHz, 10 ms, 120 Byte/Frame, 96 kbit/s pro Kanal). Ext. Advertising enthält Broadcast Audio Announcement (0x1852, zufällige Broadcast_ID pro Boot), Public Broadcast Announcement (0x1856, High Quality) und Broadcast_Name. Periodic Advertising trägt die BASE. Standardmäßig unverschlüsselt.
 
-**Testbetrieb ohne FPGA.** I2S1 läuft als Master mit APLL und absichtlich verstimmter Rate (48002 Hz ≈ +41,7 ppm) auf denselben Pins. Die Eingänge von I2S0 werden über die GPIO-Matrix intern daraufgelegt, es sind keine Kabel nötig. Damit lassen sich Driftregelung, Taktverlust (Ton aus/an) und Ende-zu-Ende-Audio testen. Im Testbetrieb darf das FPGA nicht angeschlossen sein.
+**Testbetrieb ohne FPGA.** I2S1 läuft als Master am XTAL (fraktionaler Teiler) mit absichtlich verstimmter Rate (48002 Hz → real +41,74 ppm) auf denselben Pins. Die APLL gehört dem I2S0-Slave: Bei 2 × 32 Bit und 48 kHz braucht er intern ≥ 24,576 MHz, was der 40-MHz-XTAL auf dem S31 nicht liefern kann. Die Eingänge von I2S0 werden über die GPIO-Matrix intern daraufgelegt, es sind keine Kabel nötig. Damit lassen sich Driftregelung, Taktverlust (Ton aus/an) und Ende-zu-Ende-Audio testen. Im Testbetrieb darf das FPGA nicht angeschlossen sein.
 
 **Latenz (Schätzung).** Ring ~20 ms + LC3-Frame 10 ms + LC3-Lookahead ~2,5 ms + Transport bis 20 ms + Presentation Delay 40 ms ≈ 75–95 ms.
+
+## Nachträge aus der Umsetzung (2026-10-17)
+
+- Der Takt der BLE-ISO-Events stimmt mit `esp_timer` auf < 1 ppm überein (gemessen), die Annahme „ein Quarz für alles hinter dem Ring“ hält.
+- Der Encoder-Task darf nie blockieren: Periodische Logs laufen in einem eigenen Task, die Konsole mit 921600 Baud. Eine blockierende UART-Ausgabe von ~40 ms hatte die Controller-Queue (2 SDUs = 20 ms Vorlauf) leerlaufen lassen.
+- Rechenzeit pro 10 ms: LC3 2 × mono ~3,0 ms (nur mit Code im IRAM und QIO-Flash, sonst 6 ms), Resampler ~2,2 ms. `double` ist auf dem S31 Software-emuliert und im Audiopfad tabu.
+- Nach einer Taktlücke startet der Regler mit dem gelernten Verhältnis (Warmstart), sofern der vorige `RUN` ≥ 20 s lief.
 
 ## Entscheidungen
 

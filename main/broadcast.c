@@ -63,6 +63,8 @@ static int64_t s_last_tick_us;
 static uint32_t s_tick_min = UINT32_MAX, s_tick_max;
 static uint64_t s_tick_sum;
 static uint32_t s_tick_n;
+static int64_t s_first_tick_us;
+static uint32_t s_ticks_total;
 
 static int stream_index(const esp_ble_audio_bap_stream_t *stream)
 {
@@ -86,6 +88,8 @@ static void stream_started_cb(esp_ble_audio_bap_stream_t *stream)
         atomic_store(&s_streams[0].in_flight, 0);
         atomic_store(&s_streams[1].in_flight, 0);
         s_last_tick_us = 0;
+        s_first_tick_us = 0;
+        s_ticks_total = 0;
         atomic_store(&s_streaming, true);
         s_tick(s_tick_arg);   /* prime the controller queue */
     }
@@ -135,6 +139,10 @@ static void stream_sent_cb(esp_ble_audio_bap_stream_t *stream, void *user_data)
         s_tick_n++;
     }
     s_last_tick_us = now;
+    if (s_first_tick_us == 0) {
+        s_first_tick_us = now;
+    }
+    s_ticks_total++;
     portEXIT_CRITICAL(&s_stats_lock);
 
     s_tick(s_tick_arg);
@@ -376,6 +384,9 @@ void broadcast_get_stats(broadcast_stats_t *out, bool reset_window)
     out->tick_us_min = s_tick_n ? s_tick_min : 0;
     out->tick_us_max = s_tick_max;
     out->tick_us_mean = s_tick_n ? (double)s_tick_sum / s_tick_n : 0.0;
+    int64_t span = s_last_tick_us - s_first_tick_us;
+    out->bt_ppm = (s_ticks_total > 1 && span > 0)
+                  ? ((double)(s_ticks_total - 1) * s_preset.qos.interval / (double)span - 1.0) * 1e6 : 0.0;
     if (reset_window) {
         s_tick_min = UINT32_MAX;
         s_tick_max = 0;
