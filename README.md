@@ -44,12 +44,13 @@ bricht auf diesem Board nach einigen Sekunden weg (esp-idf#19221).
 | Option | Default | Bedeutung |
 |---|---|---|
 | I2S input → BCLK/WS/DATA GPIO | 40 / 42 / 39 | Pins an J2 |
-| Input FIFO fill set point | 960 Frames (20 ms) | Sollwert des Driftreglers; bestimmt einen Teil der Latenz |
+| Input FIFO fill set point | 960 Frames (20 ms) | Sollwert des Driftreglers; bestimmt einen Teil der Latenz. Minimum 840 (darunter Unterläufe durch Block- und DMA-Granularität) |
 | Broadcast name | `AES67 Auracast` | Name, den Empfänger anzeigen (Broadcast_Name) |
 | Broadcast code | leer | leer = unverschlüsselt, sonst max. 16 Byte |
 | LC3 broadcast preset | 48_4_1 | 48 kHz, 10 ms, 120 Byte (96 kbit/s pro Kanal); alternativ 48_2_1 / 48_6_1 |
 | TX power | +9 dBm | wird auf die nächstkleinere unterstützte Stufe abgerundet |
 | Audio source | I2S | `SYNTH` = 440/880 Hz direkt, ohne I2S (Empfänger testen) |
+| Debug: skip send / ignore completion | 0 | nur für Tests der Pacing-Selbstheilung |
 
 ## Testbetrieb ohne FPGA
 
@@ -75,13 +76,13 @@ pipeline: state=RUN fill=960.0 ppm=+41.62 in_ppm=+41.74 underrun=0 ovf=0 lost=0 
 
 | Feld | Bedeutung |
 |---|---|
-| `state` | `NO_SIGNAL` (kein I2S-Takt) → `PRIME` (FIFO füllt sich) → `RUN`; `RATE_ERROR` = Eingangsrate außerhalb ±500 ppm (nach 5 s neuer Versuch). Außerhalb von `RUN` wird Stille gesendet. Nach einer Taktlücke startet der Regler mit dem zuletzt gelernten Verhältnis (Warmstart). |
+| `state` | `NO_SIGNAL` (kein I2S-Takt) → `PRIME` (FIFO füllt sich) → `RUN`; `RATE_ERROR` = gemessene Eingangsrate weicht mehr als ±600 ppm von 48 kHz ab, z. B. 44,1 kHz (Fehlermeldung mit der gemessenen Rate, nach 5 s neuer Versuch). In `PRIME` wird die Rate 0,5 s lang gemessen, bevor `RUN` beginnt. Außerhalb von `RUN` wird Stille gesendet. Nach einer Taktlücke startet der Regler mit dem zuletzt gelernten Verhältnis (Warmstart). |
 | `fill` | geschätzter FIFO-Füllstand in Frames, Mittel im 5-s-Fenster (Soll 960) |
 | `ppm` | Resampler-Verhältnis − 1 (Mittel im Fenster): Abweichung des I2S-Takts gegenüber dem Bluetooth-Takt |
-| `in_ppm` | gemessene I2S-Eingangsrate gegenüber `esp_timer`, kumulativ — sollte ≈ `ppm` + `bt_ppm` sein |
+| `in_ppm` | gemessene I2S-Eingangsrate gegenüber `esp_timer`, seit Signalbeginn (startet nach jeder Lücke neu) — sollte ≈ `ppm` + `bt_ppm` sein |
 | `underrun` / `ovf` | FIFO leer gelaufen / übergelaufen (jeweils Rückfall nach `PRIME`) |
 | `lost` | Anzahl I2S-Taktverluste im Zustand `RUN` |
-| `senderr` / `wd` | Sendefehler / Watchdog-Nachfüllungen der Controller-Queue |
+| `senderr` / `wd` | Sendefehler / Watchdog-Nachfüllungen der Controller-Queue (Pacing über Sequenznummern; ein verlorener Bestätigungs-Callback korrigiert sich beim nächsten) |
 | `tick_us` / `mean` | Abstand der SDU-Bestätigungen des Controllers (min..max / Mittel im 5-s-Fenster) |
 | `proc_us_max` | max. Rechenzeit pro SDU-Paar (Resampler + 2 × LC3), Budget 10 000 µs |
 | `sent` | bestätigte SDU-Paare seit Start |
@@ -106,6 +107,8 @@ pipeline: state=RUN fill=960.0 ppm=+41.62 in_ppm=+41.74 underrun=0 ovf=0 lost=0 
 | 2026-10-17 | Start mit 5 s verspätetem I2S-Takt | Broadcast startet in `NO_SIGNAL`, nach Taktbeginn `PRIME → RUN` |
 | 2026-10-17 | Taktlücken (2 s alle 30 s, 4×) | je `RUN → NO_SIGNAL → PRIME → RUN`, `lost` +1, Warmstart mit gelerntem Verhältnis, Ticks lückenlos, kein Reset |
 | 2026-10-17 | Falsche Rate (real +2081 ppm) | `RATE_ERROR` ~13 s nach `RUN`, zyklischer Wiederanlauf ohne Reset, `in_ppm` zeigt +2081 |
+| 2026-10-17 | Falsche Rate 44,1 kHz (nach Review-Fix) | `RATE_ERROR` 0,5 s nach Signalbeginn mit „44100 Hz“ im Log, kein Abspielen, keine Unterläufe, Wiederholversuch alle 5,5 s |
+| 2026-10-17 | Jeder 500. Bestätigungs-Callback verworfen, 60 s | durchgehend `RUN`, Füllstand 960, `wd` unverändert — Pacing heilt sich über Sequenznummern |
 | offen | Hörtest | Braucht einen Auracast-Empfänger (AirPods können kein Auracast) |
 | offen | Betrieb am FPGA | Testton aus, FPGA an J2; `in_ppm`/`ppm` zeigen die reale Abweichung PTP ↔ Modul-Quarz |
 
