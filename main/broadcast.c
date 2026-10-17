@@ -1,9 +1,15 @@
 /*
+ * SPDX-FileCopyrightText: 2021-2022 Nordic Semiconductor ASA
+ * SPDX-FileContributor: 2026 Espressif Systems (Shanghai) CO LTD
  * SPDX-License-Identifier: Apache-2.0
  *
+ * Source setup derived from the ESP-IDF example
+ * examples/bluetooth/esp_ble_audio/bap/broadcast_source/main/main.c.
+ *
  * Auracast (BAP broadcast source + Public Broadcast Profile announcement) with two BIS
- * (front left / front right). Pacing: one new SDU pair per SDU the controller confirms
- * on BIS 0, keeping BROADCAST_TX_DEPTH SDUs queued per BIS.
+ * (front left / front right). Pacing: keep BROADCAST_TX_DEPTH SDUs queued per BIS. The number
+ * in flight is derived from sequence numbers (next to send vs. newest completed on BIS 0), so a
+ * lost or late completion callback corrects itself at the next one.
  */
 #include <stdatomic.h>
 #include <string.h>
@@ -19,8 +25,11 @@
 #include "esp_ble_audio_common_api.h"
 #include "esp_ble_audio_lc3_defs.h"
 #include "esp_ble_audio_pbp_api.h"
+#include "esp_ble_iso_common_api.h"
 
 #include "ble_audio_example_utils.h"
+
+#include "tx_pacing.h"
 
 #include "adv.h"
 #include "broadcast.h"
@@ -46,14 +55,14 @@ _Static_assert(CONFIG_BT_BAP_BROADCAST_SRC_STREAM_COUNT >= STREAM_COUNT, "need 2
 static struct {
     esp_ble_audio_bap_stream_t stream;
     atomic_bool started;
-    atomic_int in_flight;
 } s_streams[STREAM_COUNT];
 
 static esp_ble_audio_bap_broadcast_source_t *s_source;
 static broadcast_tick_cb_t s_tick;
 static void *s_tick_arg;
 static atomic_bool s_streaming;
-static uint16_t s_seq;
+static uint16_t s_seq;                 /* next sequence number; written by the encoder task only */
+static atomic_uint s_last_done;        /* newest completed sequence number on BIS 0 */
 static uint32_t s_broadcast_id;
 
 /* Statistics (tick window written from the ISO task, read under a short critical section) */
@@ -85,8 +94,7 @@ static void stream_started_cb(esp_ble_audio_bap_stream_t *stream)
     }
     atomic_store(&s_streams[idx].started, true);
     if (atomic_load(&s_streams[0].started) && atomic_load(&s_streams[1].started)) {
-        atomic_store(&s_streams[0].in_flight, 0);
-        atomic_store(&s_streams[1].in_flight, 0);
+        atomic_store(&s_last_done, (uint16_t)(s_seq - 1u));
         s_last_tick_us = 0;
         s_first_tick_us = 0;
         s_ticks_total = 0;
@@ -117,18 +125,27 @@ static void stream_disconnected_cb(esp_ble_audio_bap_stream_t *stream, uint8_t r
 
 static void stream_sent_cb(esp_ble_audio_bap_stream_t *stream, void *user_data)
 {
-    int idx = stream_index(stream);
-    if (idx < 0) {
+    if (stream_index(stream) != 0) {
         return;
     }
-    if (atomic_fetch_sub(&s_streams[idx].in_flight, 1) <= 0) {
-        atomic_store(&s_streams[idx].in_flight, 0);
+#if CONFIG_AURACAST_DEBUG_DROP_SENT_EVERY > 0
+    static uint32_t s_cb_count;
+    if (++s_cb_count % CONFIG_AURACAST_DEBUG_DROP_SENT_EVERY == 0) {
+        return; /* emulate a completion event lost in the stack */
     }
-    if (idx != 0) {
-        return;
+#endif
+    const esp_ble_iso_tx_cb_info_t *info = user_data;
+    uint32_t completed = 1;
+    if (info != NULL && info->pkt_cnt > 0) {
+        atomic_store(&s_last_done, info->pkt[info->pkt_cnt - 1].seq_num);
+        completed = info->completed_pkts ? info->completed_pkts : 1;
+    } else {
+        /* No sequence information: count the completions instead */
+        completed = (info != NULL && info->completed_pkts) ? info->completed_pkts : 1;
+        atomic_store(&s_last_done, (uint16_t)(atomic_load(&s_last_done) + completed));
     }
 
-    atomic_fetch_add(&s_sent, 1);
+    atomic_fetch_add(&s_sent, completed);
     int64_t now = esp_timer_get_time();
     portENTER_CRITICAL(&s_stats_lock);
     if (s_last_tick_us) {
@@ -338,8 +355,7 @@ uint32_t broadcast_pairs_wanted(void)
     if (!broadcast_streaming()) {
         return 0;
     }
-    int in_flight = atomic_load(&s_streams[0].in_flight);
-    return in_flight >= BROADCAST_TX_DEPTH ? 0 : (uint32_t)(BROADCAST_TX_DEPTH - in_flight);
+    return tx_pairs_wanted(s_seq, (uint16_t)atomic_load(&s_last_done), BROADCAST_TX_DEPTH);
 }
 
 esp_err_t broadcast_send_pair(const uint8_t *sdu_l, const uint8_t *sdu_r, uint16_t len)
@@ -350,10 +366,8 @@ esp_err_t broadcast_send_pair(const uint8_t *sdu_l, const uint8_t *sdu_r, uint16
     const uint8_t *sdu[STREAM_COUNT] = {sdu_l, sdu_r};
     esp_err_t ret = ESP_OK;
     for (int i = 0; i < STREAM_COUNT; i++) {
-        atomic_fetch_add(&s_streams[i].in_flight, 1);
         esp_err_t err = esp_ble_audio_bap_stream_send(&s_streams[i].stream, sdu[i], len, s_seq);
         if (err) {
-            atomic_fetch_sub(&s_streams[i].in_flight, 1);
             atomic_fetch_add(&s_send_err, 1);
             ret = err;
         }
@@ -364,9 +378,8 @@ esp_err_t broadcast_send_pair(const uint8_t *sdu_l, const uint8_t *sdu_r, uint16
 
 void broadcast_reset_in_flight(void)
 {
-    for (int i = 0; i < STREAM_COUNT; i++) {
-        atomic_store(&s_streams[i].in_flight, 0);
-    }
+    /* No completion for a while: assume everything was transmitted. Late callbacks re-sync it. */
+    atomic_store(&s_last_done, (uint16_t)(s_seq - 1u));
     atomic_fetch_add(&s_wd_refills, 1);
 }
 

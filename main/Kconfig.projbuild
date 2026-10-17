@@ -13,7 +13,10 @@ menu "AES67 Auracast bridge"
         config AURACAST_FIFO_TARGET_FRAMES
             int "Input FIFO fill set point (frames @ 48 kHz)"
             default 960
-            range 720 3000
+            range 840 3000
+            help
+                Must cover one block (480) + one DMA block (240) + jitter: below ~760 frames
+                underruns appear (simulated with the measured tick and ISR jitter).
     endmenu
 
     menu "Broadcast"
@@ -74,6 +77,10 @@ menu "AES67 Auracast bridge"
 
     config AURACAST_DEBUG_SKIP_SEND_EVERY
         int "Debug: skip sending every Nth SDU pair (0 = off)"
+        default 0
+
+    config AURACAST_DEBUG_DROP_SENT_EVERY
+        int "Debug: ignore every Nth completion callback of BIS 0 (0 = off)"
         default 0
 
 endmenu

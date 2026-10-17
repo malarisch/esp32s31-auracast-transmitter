@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Pure C DSP building blocks: builds as an ESP-IDF component or as a host library for tests.
-set(AUDIO_DSP_SRCS spsc_ring.c resampler.c drift_ctrl.c)
+set(AUDIO_DSP_SRCS spsc_ring.c resampler.c drift_ctrl.c rate_check.c tx_pacing.c)
 
 if(ESP_PLATFORM)
     idf_component_register(SRCS ${AUDIO_DSP_SRCS}

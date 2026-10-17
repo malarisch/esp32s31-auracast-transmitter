@@ -30,6 +30,7 @@
 #if CONFIG_AURACAST_SOURCE_I2S
 #include "drift_ctrl.h"
 #include "i2s_in.h"
+#include "rate_check.h"
 #include "resampler.h"
 #include "spsc_ring.h"
 #include "test_tone.h"
@@ -157,6 +158,7 @@ static void source_log_fields(const window_stats_t *w, double *fill, double *ppm
 #define RATE_ERROR_HOLD_US 5000000
 #define LEARNED_MIN_RUN_US 20000000   /* trust the learned clock offset after 20 s in RUN */
 #define STALE_ISR_US       (2 * I2S_IN_DMA_FRAMES * 1000000 / 48000)  /* two DMA blocks overdue */
+#define RATE_MAX_PPM       600.0      /* controller range (+-500 ppm) plus measurement margin */
 
 typedef enum {
     PIPE_NO_SIGNAL,
@@ -181,6 +183,8 @@ static bool s_fade_in;
 static int64_t s_run_since;
 static double s_learned_ratio = 1.0;
 static bool s_have_learned;
+static rate_check_t s_rc;
+static volatile float s_in_ppm;   /* measured input rate since the signal (re)appeared */
 
 #if CONFIG_AURACAST_TEST_TONE
 /* End-to-end check without a receiver: tone frequency per channel after resampling */
@@ -276,6 +280,15 @@ static void enter_run(int64_t now)
     set_state(PIPE_RUN);
 }
 
+static void enter_rate_error(int64_t now, double ppm)
+{
+    ESP_LOGE(TAG, "input rate %+.0f ppm off 48 kHz (%.0f Hz), check FPGA sample rate", ppm,
+             48000.0 * (1.0 + ppm * 1e-6));
+    s_rate_error_since = now;
+    s_have_learned = false;
+    set_state(PIPE_RATE_ERROR);
+}
+
 /* One RUN step: control loop, resample 480 frames per channel into s_pcm. false = left RUN. */
 static bool run_step(int64_t now, const i2s_in_snapshot_t *snap)
 {
@@ -285,10 +298,8 @@ static bool run_step(int64_t now, const i2s_in_snapshot_t *snap)
     s_last_run_us = now;
 
     if (drift_ctrl_update(&s_dc, est, dt) == DRIFT_OUT_OF_RANGE) {
-        ESP_LOGE(TAG, "input rate out of range (%+.0f ppm), check FPGA sample rate", drift_ctrl_ppm(&s_dc));
-        s_rate_error_since = now;
-        s_have_learned = false;
-        set_state(PIPE_RATE_ERROR);
+        /* Backstop: the direct rate check normally fires first */
+        enter_rate_error(now, s_in_ppm);
         return false;
     }
     resampler_set_ratio(s_rs, drift_ctrl_ratio(&s_dc));
@@ -351,17 +362,31 @@ static void source_fill(void)
     uint32_t ovf_delta = snap.overflow_frames - s_last_ovf_frames;
     s_last_ovf_frames = snap.overflow_frames;
 
+    /* Direct rate check while a signal is present (reference restarts when the signal reappears) */
+    rate_status_t rate = RATE_UNKNOWN;
+    if (s_st == PIPE_PRIME || s_st == PIPE_RUN) {
+        double ppm = 0.0;
+        rate = rate_check_update(&s_rc, snap.frames_total, snap.t_last_isr_us, 48000.0, RATE_MAX_PPM, &ppm);
+        s_in_ppm = (float)ppm;
+        if (rate == RATE_BAD) {
+            enter_rate_error(now, ppm);
+            silence();
+            return;
+        }
+    }
+
     switch (s_st) {
     case PIPE_NO_SIGNAL:
         if (snap.signal_present) {
             spsc_ring_drop_all(&s_ring);
+            rate_check_reset(&s_rc);
             set_state(PIPE_PRIME);
         }
         break;
     case PIPE_PRIME:
         if (!snap.signal_present) {
             set_state(PIPE_NO_SIGNAL);
-        } else if (snap.ring_count >= CONFIG_AURACAST_FIFO_TARGET_FRAMES) {
+        } else if (rate == RATE_OK && snap.ring_count >= CONFIG_AURACAST_FIFO_TARGET_FRAMES) {
             enter_run(now);
             /* Consume in this tick already, otherwise the loop starts 480 frames above the set point */
             i2s_in_snapshot(&snap);
@@ -399,17 +424,7 @@ static const char *source_state(void)
 static void source_log_fields(const window_stats_t *w, double *fill, double *ppm, double *in_ppm,
                               uint32_t *underrun, uint32_t *ovf, uint32_t *lost)
 {
-    /* Input rate against esp_timer, cumulative since the first snapshot with signal */
-    static i2s_in_snapshot_t first;
-    i2s_in_snapshot_t snap;
-    i2s_in_snapshot(&snap);
-    *in_ppm = 0.0;
-    if (first.frames_total == 0 && snap.signal_present) {
-        first = snap;
-    } else if (first.frames_total && snap.t_last_isr_us > first.t_last_isr_us) {
-        double dt = (double)(snap.t_last_isr_us - first.t_last_isr_us) * 1e-6;
-        *in_ppm = ((double)(snap.frames_total - first.frames_total) / dt / 48000.0 - 1.0) * 1e6;
-    }
+    *in_ppm = s_in_ppm;
     *fill = w->ctrl_n ? w->fill_sum / w->ctrl_n : 0.0;
     *ppm = w->ctrl_n ? w->ppm_sum / w->ctrl_n : 0.0;
     *underrun = s_underrun_v;
