@@ -1,0 +1,9 @@
+docs/**
+!docs/superpowers/
+!docs/superpowers/**
+build/
+build_host/
+sdkconfig
+sdkconfig.old
+managed_components/
+.superpowers/

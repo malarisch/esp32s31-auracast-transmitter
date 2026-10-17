@@ -1,0 +1,79 @@
+menu "AES67 Auracast bridge"
+
+    menu "I2S input (from FPGA)"
+        config AURACAST_I2S_BCLK_GPIO
+            int "BCLK GPIO (J2-19)"
+            default 40
+        config AURACAST_I2S_WS_GPIO
+            int "WS GPIO (J2-20)"
+            default 42
+        config AURACAST_I2S_DIN_GPIO
+            int "DATA GPIO (J2-21)"
+            default 39
+        config AURACAST_FIFO_TARGET_FRAMES
+            int "Input FIFO fill set point (frames @ 48 kHz)"
+            default 960
+            range 720 3000
+    endmenu
+
+    menu "Broadcast"
+        config AURACAST_BROADCAST_NAME
+            string "Broadcast name (4..32 bytes)"
+            default "AES67 Auracast"
+        config AURACAST_BROADCAST_CODE
+            string "Broadcast code (empty = unencrypted, max 16 bytes)"
+            default ""
+
+        choice AURACAST_PRESET
+            prompt "LC3 broadcast preset"
+            default AURACAST_PRESET_48_4_1
+            config AURACAST_PRESET_48_2_1
+                bool "48_2_1 (48 kHz, 10 ms, 100 B, 80 kbit/s per channel)"
+            config AURACAST_PRESET_48_4_1
+                bool "48_4_1 (48 kHz, 10 ms, 120 B, 96 kbit/s per channel)"
+            config AURACAST_PRESET_48_6_1
+                bool "48_6_1 (48 kHz, 10 ms, 155 B, 124 kbit/s per channel)"
+        endchoice
+
+        config AURACAST_TX_POWER_DBM
+            int "TX power (dBm)"
+            default 9
+            range -15 20
+    endmenu
+
+    choice AURACAST_SOURCE
+        prompt "Audio source"
+        default AURACAST_SOURCE_I2S
+        config AURACAST_SOURCE_I2S
+            bool "I2S slave input (FPGA)"
+        config AURACAST_SOURCE_SYNTH
+            bool "Synthetic tones (440 Hz left, 880 Hz right), no I2S"
+    endchoice
+
+    menu "Test mode (no FPGA)"
+        depends on AURACAST_SOURCE_I2S
+        config AURACAST_TEST_TONE
+            bool "Generate test tone on I2S1 and loop it back into the I2S input"
+            default n
+            help
+                I2S1 drives BCLK/WS/DATA on the input pins as master (APLL clock).
+                Do not connect the FPGA while this is enabled.
+        config AURACAST_TEST_TONE_RATE_HZ
+            int "Test tone sample rate (Hz), deliberately off 48000 to emulate drift"
+            depends on AURACAST_TEST_TONE
+            default 48002
+        config AURACAST_TEST_TONE_START_DELAY_MS
+            int "Delay before the test tone starts (ms)"
+            depends on AURACAST_TEST_TONE
+            default 0
+        config AURACAST_TEST_TONE_GAP_TEST
+            bool "Switch the test tone off for 2 s every 30 s"
+            depends on AURACAST_TEST_TONE
+            default n
+    endmenu
+
+    config AURACAST_DEBUG_SKIP_SEND_EVERY
+        int "Debug: skip sending every Nth SDU pair (0 = off)"
+        default 0
+
+endmenu
