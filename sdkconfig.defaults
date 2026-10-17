@@ -22,3 +22,9 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 
 # ESP32-S31-WROOM-3 module: 16 MB flash
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# Performance: -O2, and the PIE/SIMD LC3 library (SIMD exists on core 1 only; the encoder task is pinned there)
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_ESP_AUDIO_CODEC_S31_USE_ASM=y
+# Quad I/O flash: faster cache refills (instruction fetch from flash)
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y

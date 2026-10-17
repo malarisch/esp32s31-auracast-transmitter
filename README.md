@@ -47,3 +47,7 @@ bricht auf diesem Board nach einigen Sekunden weg (esp-idf#19221).
 | 2026-10-17 | I2S-Slave-Takt | Braucht die APLL: 2×32 Bit bei 48 kHz verlangen intern ≥ 24,576 MHz mit Teiler ≥ 2, XTAL (40 MHz) reicht nicht |
 | 2026-10-17 | Testton 48002 Hz (XTAL, Teiler 3+88/345 → real +41,74 ppm) | gemessen +41,73 … +41,79 ppm, Töne 440,0/880,0 Hz, kein Überlauf |
 | 2026-10-17 | Testton 47998 Hz (XTAL, Teiler 3+12/47 → real −34,04 ppm) | gemessen −34,03 … −34,07 ppm |
+| 2026-10-17 | LC3-Encoder, 2 × mono 48 kHz/10 ms/120 B | 6,0 ms aus Flash (DIO) → 4,6 ms (QIO) → 3,0 ms (Code im IRAM, `main/lc3_iram.lf`); ASM-Variante allein bringt nichts |
+| 2026-10-17 | Broadcast, Synth-Quelle, 70 s | Tick-Mittel 10 000,0 µs, Spanne 9,5–10,6 ms (keine Bündelung), senderr=0, wd=0, Rechenzeit max. 3,2 ms/Paar, Heap frei 224 KB |
+| 2026-10-17 | Selbstheilung (jedes 500. Paar nicht gesendet), 60 s | Ticks unverändert 10 000 µs, kein Stillstand, Queue füllt sich beim nächsten Tick wieder auf |
+| offen | Hörtest | Braucht einen Auracast-Empfänger (AirPods können kein Auracast) |

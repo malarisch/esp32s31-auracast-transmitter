@@ -9,7 +9,14 @@
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
+#include "esp_ble_audio_common_api.h"
+
+#include "ble_audio_example_init.h"
+
+#include "adv.h"
+#include "broadcast.h"
 #include "i2s_in.h"
+#include "pipeline.h"
 #include "spsc_ring.h"
 #include "test_tone.h"
 
@@ -96,6 +103,16 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
 
     ESP_LOGI(TAG, "auracast-s31 boot, IDF %s", esp_get_idf_version());
+
+    ESP_ERROR_CHECK(bluetooth_init());
+    if (adv_host_init() != 0) {
+        ESP_LOGE(TAG, "GAP init failed");
+        return;
+    }
+    ESP_ERROR_CHECK(esp_ble_audio_common_init(NULL));
+    broadcast_set_tx_power();
+    ESP_ERROR_CHECK(pipeline_start());
+    ESP_ERROR_CHECK(broadcast_start(pipeline_tick, NULL));
 
 #if CONFIG_AURACAST_SOURCE_I2S
     xTaskCreatePinnedToCore(i2s_diag_task, "i2s_diag", 4096, NULL, 12, NULL, 1);
