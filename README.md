@@ -32,7 +32,7 @@ idf.py --preview set-target esp32s31           # S31 ist in v6.1 ein Preview-Tar
 idf.py build
 PORT=/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_64a7b6c7d0bcf011a704167148e9de0f-if00-port0
 idf.py -p $PORT flash
-python tools/serial_log.py --port $PORT --seconds 10 --reset
+mkdir -p logs && python tools/serial_log.py --port $PORT --seconds 10 --reset | tee logs/boot.log
 ```
 
 Flashen und Logs laufen über den **USB-UART-Port (CP2102N)** mit **921600 Baud** (`serial_log.py` nutzt das als Default;
