@@ -152,6 +152,14 @@ wählt beide BIS aus und abonniert von selbst neu, wenn der Broadcast wegfällt.
 Quelle `bluez_input.<MAC>…` an, die WirePlumber meist sofort auf die Standard-Lautsprecher legt (`pw-link -d` trennt,
 `pw-record --target …` nimmt auf). Von Hand geht dasselbe mit `bluetoothctl`:
 
+**Bekannter Fehler am PC (PipeWire 1.6.2):** Den Live-Modus (24 kHz) gibt PipeWire zerhackt und metallisch wieder.
+Die Funkdaten sind dabei korrekt: Die per HCI mitgeschnittenen SDUs, mit liblc3 dekodiert, sind lückenlos und
+stimmen mit der AES67-Referenz überein. Gemessen am 2026-10-19 durch blockweisen Vergleich der PipeWire-Quelle mit
+genau diesen SDUs: Live 24 kHz nur 19–30 % korrekte Blöcke mit laufenden Zeitsprüngen; HQ 48 kHz stereo 99,7 %;
+dieselbe Live-Ankündigung mit 48 kHz mono (auch mit Live-QoS RTN 2 / 10 ms) 98 %. Auslöser ist allein die
+Abtastrate 24 kHz im BAP-Empfangspfad von PipeWire, nicht Presentation Delay, Mono, Kontext oder QoS. Zum Hören am PC
+den HQ-Modus nehmen; für Hörgeräte bleibt 24_2_1 der empfohlene Standard.
+
 ```bash
 remove <MAC>                     # nach einem Board-Reset
 scan le                          # findet "AES67 Auracast", legt sid0/bis1 und sid0/bis2 als Transports an
