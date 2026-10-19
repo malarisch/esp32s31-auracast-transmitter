@@ -46,8 +46,21 @@ menu "AES67 Auracast bridge"
             string "Broadcast code (empty = unencrypted, max 16 bytes)"
             default ""
 
+        choice AURACAST_MODE
+            prompt "Broadcast mode"
+            default AURACAST_MODE_LIVE
+            config AURACAST_MODE_LIVE
+                bool "Live / hearing aids (24_2_1 mono)"
+                help
+                    One mono BIS (L+R)/2, LC3 24 kHz, 10 ms, 60 bytes, Standard Quality: receivable by
+                    hearing aids, low latency (RTN 2, max. transport latency 10 ms).
+            config AURACAST_MODE_HQ
+                bool "HQ stereo (48 kHz, 2 BIS)"
+        endchoice
+
         choice AURACAST_PRESET
             prompt "LC3 broadcast preset"
+            depends on AURACAST_MODE_HQ
             default AURACAST_PRESET_48_4_1
             config AURACAST_PRESET_48_2_1
                 bool "48_2_1 (48 kHz, 10 ms, 100 B, 80 kbit/s per channel)"
@@ -56,6 +69,23 @@ menu "AES67 Auracast bridge"
             config AURACAST_PRESET_48_6_1
                 bool "48_6_1 (48 kHz, 10 ms, 155 B, 124 kbit/s per channel)"
         endchoice
+
+        config AURACAST_CONTEXT_LIVE
+            bool "Streaming context Live (otherwise Media)"
+            default y if AURACAST_MODE_LIVE
+        config AURACAST_IMMEDIATE_RENDERING
+            bool "Announce Broadcast_Audio_Immediate_Rendering_Flag"
+            default y if AURACAST_MODE_LIVE
+            help
+                Asks receivers to render as early as they can (may be below the presentation delay).
+                Recommended for live sound, where listeners also hear the room.
+        config AURACAST_PRESENTATION_DELAY_US
+            int "Presentation delay (us)"
+            range 20000 40000
+            default 20000 if AURACAST_MODE_LIVE
+            default 40000
+            help
+                All Auracast receivers support 40 ms; HAP/TMAP receivers (hearing aids) 20..40 ms.
 
         config AURACAST_TX_POWER_DBM
             int "TX power (dBm)"

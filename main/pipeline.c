@@ -1,12 +1,13 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
- * Encoder task: produces one SDU pair (left/right LC3 frame) whenever the controller
- * has room in its queue, paced by the BIS "sent" callbacks (Bluetooth clock domain).
+ * Encoder task: produces one SDU set (one LC3 frame per BIS: left/right in HQ mode, mono in
+ * Live mode) whenever the controller has room in its queue, paced by the BIS "sent" callbacks
+ * (Bluetooth clock domain).
  *
- * I2S source: frames arrive in the FPGA's (PTP) clock domain through the SPSC ring.
- * A PI controller steers the resampler ratio from the ring fill level, so exactly
- * 480 frames per channel leave per 10 ms of Bluetooth time.
+ * I2S source: 48 kHz frames arrive in the FPGA's (PTP) clock domain through the SPSC ring.
+ * A PI controller steers the resampler ratio from the ring fill level, so exactly one LC3
+ * frame per channel (480 frames at 48 kHz, 240 at 24 kHz) leaves per 10 ms of Bluetooth time.
  *
  *   NO_SIGNAL --signal--> PRIME --fill >= set point--> RUN
  *   RUN --signal lost--> NO_SIGNAL, RUN --underrun/overflow--> PRIME,
@@ -36,7 +37,7 @@
 #include "test_tone.h"
 #endif
 
-#define FRAMES          480     /* 10 ms at 48 kHz */
+#define FRAMES          480     /* 10 ms at 48 kHz: I2S input per tick, and the largest LC3 frame */
 #define MAX_SDU         160
 #define WATCHDOG_MS     50
 #define STATS_PERIOD_US 5000000
@@ -49,8 +50,10 @@ static int32_t s_pcm[2][FRAMES];
 static uint8_t s_sdu[2][MAX_SDU];
 static void *s_enc[2];
 static uint16_t s_sdu_len;
+static uint8_t s_nch;           /* BIS = encoder channels */
+static uint32_t s_out_frames;   /* LC3 frame length at the BIS sample rate */
 
-static uint32_t s_pairs;
+static uint32_t s_frames_made;
 
 /*
  * Window statistics: accumulated by the encoder task, read and reset by the stats task.
@@ -79,9 +82,9 @@ void pipeline_tick(void *arg)
 
 static esp_err_t encoders_open(void)
 {
-    for (int ch = 0; ch < 2; ch++) {
+    for (int ch = 0; ch < s_nch; ch++) {
         esp_lc3_enc_config_t cfg = ESP_LC3_ENC_CONFIG_DEFAULT();
-        cfg.sample_rate = 48000;
+        cfg.sample_rate = broadcast_sample_rate();
         cfg.bits_per_sample = 32;
         cfg.channel = 1;
         cfg.frame_dms = 100;
@@ -94,14 +97,14 @@ static esp_err_t encoders_open(void)
     int in_size = 0, out_size = 0;
     esp_lc3_enc_get_frame_size(s_enc[0], &in_size, &out_size);
     ESP_LOGI(TAG, "LC3 encoders: in %d bytes, out %d bytes per frame", in_size, out_size);
-    return in_size == FRAMES * (int)sizeof(int32_t) ? ESP_OK : ESP_FAIL;
+    return in_size == (int)(s_out_frames * sizeof(int32_t)) ? ESP_OK : ESP_FAIL;
 }
 
 static bool encode(int ch)
 {
     esp_audio_enc_in_frame_t in = {
         .buffer = (uint8_t *)s_pcm[ch],
-        .len = FRAMES * sizeof(int32_t),
+        .len = s_out_frames * sizeof(int32_t),
     };
     esp_audio_enc_out_frame_t out = {
         .buffer = s_sdu[ch],
@@ -116,16 +119,22 @@ static void silence(void)
 }
 
 #if CONFIG_AURACAST_SOURCE_SYNTH
-/* 1200 frames hold exactly 11 periods of 440 Hz and 22 of 880 Hz; computed once (double is soft-float here) */
+/*
+ * 25 ms hold exactly 11 periods of 440 Hz and 22 of 880 Hz (1200 frames at 48 kHz, 600 at 24 kHz);
+ * computed once (double is soft-float here)
+ */
 #define SYNTH_TABLE_FRAMES 1200
 static int32_t s_synth[2][SYNTH_TABLE_FRAMES];
+static uint32_t s_synth_len;
 
 static void source_init(void)
 {
     static const double freq[2] = {440.0, 880.0};
-    for (int ch = 0; ch < 2; ch++) {
-        for (int i = 0; i < SYNTH_TABLE_FRAMES; i++) {
-            s_synth[ch][i] = (int32_t)lrint(SYNTH_AMPLITUDE * 2147483647.0 * sin(2.0 * M_PI * freq[ch] * i / 48000.0));
+    const uint32_t rate = broadcast_sample_rate();
+    s_synth_len = rate / 40;
+    for (int ch = 0; ch < s_nch; ch++) {
+        for (uint32_t i = 0; i < s_synth_len; i++) {
+            s_synth[ch][i] = (int32_t)lrint(SYNTH_AMPLITUDE * 2147483647.0 * sin(2.0 * M_PI * freq[ch] * i / rate));
         }
     }
 }
@@ -133,10 +142,11 @@ static void source_init(void)
 static void source_fill(void)
 {
     static uint32_t pos;
-    for (int i = 0; i < FRAMES; i++) {
-        s_pcm[0][i] = s_synth[0][pos];
-        s_pcm[1][i] = s_synth[1][pos];
-        pos = (pos + 1) % SYNTH_TABLE_FRAMES;
+    for (uint32_t i = 0; i < s_out_frames; i++) {
+        for (int ch = 0; ch < s_nch; ch++) {
+            s_pcm[ch][i] = s_synth[ch][pos];
+        }
+        pos = (pos + 1) % s_synth_len;
     }
 }
 
@@ -154,7 +164,7 @@ static void source_log_fields(const window_stats_t *w, double *fill, double *ppm
 #else /* CONFIG_AURACAST_SOURCE_I2S */
 
 #define RING_FRAMES     4096
-#define IN_MAX_FRAMES   (FRAMES + FRAMES / 50 + RESAMPLER_TAPS + 8)
+#define IN_MAX_FRAMES   (FRAMES + FRAMES / 50 + 2 * RESAMPLER_TAPS + 8)   /* decimating filter: 2 x taps */
 #define RATE_ERROR_HOLD_US 5000000
 #define LEARNED_MIN_RUN_US 20000000   /* trust the learned clock offset after 20 s in RUN */
 #define STALE_ISR_US       (2 * I2S_IN_DMA_FRAMES * 1000000 / 48000)  /* two DMA blocks overdue */
@@ -221,7 +231,7 @@ static void tone_ctl_task(void *arg)
 static void source_init(void)
 {
     spsc_ring_init(&s_ring, s_ring_buf, RING_FRAMES, 2);
-    s_rs = resampler_create(2, FRAMES);
+    s_rs = resampler_create_decim(s_nch, s_out_frames, (uint8_t)(48000 / broadcast_sample_rate()));
     ESP_ERROR_CHECK(s_rs ? ESP_OK : ESP_ERR_NO_MEM);
     const i2s_in_cfg_t cfg = {
         .bclk_gpio = CONFIG_AURACAST_I2S_BCLK_GPIO,
@@ -262,7 +272,7 @@ static void enter_run(int64_t now)
     resampler_set_ratio(s_rs, drift_ctrl_ratio(&s_dc));
 
     /* Pre-load the resampler's look-ahead so its first pull takes a regular-sized block */
-    uint32_t lookahead = resampler_input_needed(s_rs, FRAMES) - FRAMES;
+    uint32_t lookahead = resampler_input_needed(s_rs, s_out_frames) - FRAMES;
     lookahead = spsc_ring_read(&s_ring, s_in, lookahead);
     resampler_push(s_rs, s_in, lookahead);
 
@@ -289,7 +299,7 @@ static void enter_rate_error(int64_t now, double ppm)
     set_state(PIPE_RATE_ERROR);
 }
 
-/* One RUN step: control loop, resample 480 frames per channel into s_pcm. false = left RUN. */
+/* One RUN step: control loop, resample one LC3 frame per channel into s_pcm. false = left RUN. */
 static bool run_step(int64_t now, const i2s_in_snapshot_t *snap)
 {
     double est = fill_estimate(snap->ring_count, snap->t_last_isr_us, now, 48000.0, I2S_IN_DMA_FRAMES);
@@ -309,7 +319,7 @@ static bool run_step(int64_t now, const i2s_in_snapshot_t *snap)
     s_win.fill_sum += est;
     s_win.ctrl_n++;
     portEXIT_CRITICAL(&s_win_lock);
-    uint32_t need = resampler_input_needed(s_rs, FRAMES);
+    uint32_t need = resampler_input_needed(s_rs, s_out_frames);
     if (now - s_run_since >= LEARNED_MIN_RUN_US) {
         s_learned_ratio = drift_ctrl_learned_ratio(&s_dc);
         s_have_learned = true;
@@ -328,19 +338,20 @@ static bool run_step(int64_t now, const i2s_in_snapshot_t *snap)
     spsc_ring_read(&s_ring, s_in, need);
     resampler_push(s_rs, s_in, need);
     int32_t *const out[2] = {s_pcm[0], s_pcm[1]};
-    resampler_pull(s_rs, out, FRAMES);
+    resampler_pull(s_rs, out, s_out_frames);
 
     if (s_fade_in) {
-        for (int i = 0; i < FRAMES; i++) {
-            s_pcm[0][i] = (int32_t)((int64_t)s_pcm[0][i] * i / FRAMES);
-            s_pcm[1][i] = (int32_t)((int64_t)s_pcm[1][i] * i / FRAMES);
+        for (int ch = 0; ch < s_nch; ch++) {
+            for (uint32_t i = 0; i < s_out_frames; i++) {
+                s_pcm[ch][i] = (int32_t)((int64_t)s_pcm[ch][i] * i / s_out_frames);
+            }
         }
         s_fade_in = false;
     }
 #if CONFIG_AURACAST_TEST_TONE
     uint32_t cross[2] = {0, 0};
-    for (int ch = 0; ch < 2; ch++) {
-        for (int i = 0; i < FRAMES; i++) {
+    for (int ch = 0; ch < s_nch; ch++) {
+        for (uint32_t i = 0; i < s_out_frames; i++) {
             cross[ch] += (s_prev[ch] < 0 && s_pcm[ch][i] >= 0);
             s_prev[ch] = s_pcm[ch][i];
         }
@@ -348,7 +359,7 @@ static bool run_step(int64_t now, const i2s_in_snapshot_t *snap)
     portENTER_CRITICAL(&s_win_lock);
     s_win.cross[0] += cross[0];
     s_win.cross[1] += cross[1];
-    s_win.cross_frames += FRAMES;
+    s_win.cross_frames += s_out_frames;
     portEXIT_CRITICAL(&s_win_lock);
 #endif
     return true;
@@ -432,28 +443,32 @@ static void source_log_fields(const window_stats_t *w, double *fill, double *ppm
     *lost = s_lost_v;
 #if CONFIG_AURACAST_TEST_TONE
     if (w->cross_frames) {
-        double secs = w->cross_frames / 48000.0;
+        double secs = w->cross_frames / (double)broadcast_sample_rate();
         ESP_LOGI(TAG, "tone check (after resampler): L=%.1fHz R=%.1fHz", w->cross[0] / secs, w->cross[1] / secs);
     }
 #endif
 }
 #endif /* CONFIG_AURACAST_SOURCE_I2S */
 
-static void produce_pair(void)
+static void produce_frame(void)
 {
     int64_t t0 = esp_timer_get_time();
     source_fill();
-    bool ok = encode(0) && encode(1);
-    s_pairs++;
+    bool ok = true;
+    for (int ch = 0; ch < s_nch; ch++) {
+        ok = encode(ch) && ok;
+    }
+    s_frames_made++;
     if (!ok) {
         ESP_LOGE(TAG, "LC3 encode failed");
     }
 #if CONFIG_AURACAST_DEBUG_SKIP_SEND_EVERY > 0
-    if (s_pairs % CONFIG_AURACAST_DEBUG_SKIP_SEND_EVERY == 0) {
+    if (s_frames_made % CONFIG_AURACAST_DEBUG_SKIP_SEND_EVERY == 0) {
         return;
     }
 #endif
-    broadcast_send_pair(s_sdu[0], s_sdu[1], s_sdu_len);
+    const uint8_t *const sdu[2] = {s_sdu[0], s_sdu[1]};
+    broadcast_send_frame(sdu, s_sdu_len);
     uint32_t proc = (uint32_t)(esp_timer_get_time() - t0);
     portENTER_CRITICAL(&s_win_lock);
     s_win.proc_us_max = proc > s_win.proc_us_max ? proc : s_win.proc_us_max;
@@ -491,6 +506,8 @@ static void stats_task(void *arg)
 static void encoder_task(void *arg)
 {
     s_sdu_len = broadcast_sdu_len();
+    s_nch = broadcast_stream_count();
+    s_out_frames = broadcast_sample_rate() / 100;
     if (s_sdu_len > MAX_SDU || encoders_open() != ESP_OK) {
         ESP_LOGE(TAG, "encoder setup failed (sdu %u)", s_sdu_len);
         vTaskDelete(NULL);
@@ -505,8 +522,8 @@ static void encoder_task(void *arg)
             /* No confirmation for 50 ms: assume the controller queue ran dry and refill it */
             broadcast_reset_in_flight();
         }
-        for (uint32_t n = broadcast_pairs_wanted(); n > 0; n--) {
-            produce_pair();
+        for (uint32_t n = broadcast_frames_wanted(); n > 0; n--) {
+            produce_frame();
         }
     }
 }
