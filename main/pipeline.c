@@ -61,6 +61,8 @@ static portMUX_TYPE s_bits_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_bits_acc[2];
 enum { BITS_LOG, BITS_STATUS };
 
+static volatile bool s_source_ready;   /* source_init() done: the I2S input may be queried */
+
 static uint32_t s_frames_made;
 
 /*
@@ -503,6 +505,9 @@ static uint32_t bits_take(int who)
 void pipeline_get_status(pipeline_status_t *out)
 {
     memset(out, 0, sizeof(*out));
+    if (!s_source_ready) {
+        return;
+    }
 #if CONFIG_AURACAST_SOURCE_I2S
     _Static_assert(PIPE_NO_SIGNAL == AURA_PIPE_NO_SIGNAL && PIPE_PRIME == AURA_PIPE_PRIME && PIPE_RUN == AURA_PIPE_RUN &&
                    PIPE_RATE_ERROR == AURA_PIPE_RATE_ERROR, "pipe states match the protocol");
@@ -586,6 +591,7 @@ static void encoder_task(void *arg)
         return;
     }
     source_init();
+    s_source_ready = true;
     s_task = xTaskGetCurrentTaskHandle();
 
     for (;;) {

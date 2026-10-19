@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * AES67 -> Auracast bridge: I2S slave input (FPGA) re-broadcast as LE Audio (LC3, 1 or 2 BIS).
+ * After boot it waits for its stream configuration from the I2C master (ctrl_i2c.c).
  */
 #include "esp_log.h"
 #include "esp_system.h"
@@ -13,10 +14,23 @@
 
 #include "adv.h"
 #include "broadcast.h"
-#include "ctrl_regs.h"
+#include "ctrl_i2c.h"
 #include "pipeline.h"
 
 static const char *TAG = "main";
+
+static esp_err_t start_broadcast(const ctrl_config_t *cfg)
+{
+    broadcast_set_tx_power(cfg->tx_power_dbm);
+    esp_err_t err = broadcast_configure(cfg);
+    if (err == ESP_OK) {
+        err = pipeline_start(cfg);
+    }
+    if (err == ESP_OK) {
+        err = broadcast_start(pipeline_tick, NULL);
+    }
+    return err;
+}
 
 void app_main(void)
 {
@@ -35,16 +49,13 @@ void app_main(void)
         return;
     }
     ESP_ERROR_CHECK(esp_ble_audio_common_init(NULL));
+    ESP_ERROR_CHECK(ctrl_i2c_start());
 
-    static ctrl_regs_t regs;
-    static const uint8_t fw[3] = {0, 0, 0};
     ctrl_config_t cfg;
-    uint8_t bad;
-    ctrl_regs_init(&regs, fw, 0);
-    ESP_ERROR_CHECK(ctrl_regs_get_config(&regs, &cfg, &bad) == AURA_ERR_NONE ? ESP_OK : ESP_ERR_INVALID_ARG);
-
-    broadcast_set_tx_power(cfg.tx_power_dbm);
-    ESP_ERROR_CHECK(broadcast_configure(&cfg));
-    ESP_ERROR_CHECK(pipeline_start(&cfg));
-    ESP_ERROR_CHECK(broadcast_start(pipeline_tick, NULL));
+    ctrl_i2c_wait_start(&cfg);
+    err = start_broadcast(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "broadcast start failed: %s", esp_err_to_name(err));
+        ctrl_i2c_set_state(AURA_STATE_FAULT, AURA_ERR_START_FAILED);
+    }
 }

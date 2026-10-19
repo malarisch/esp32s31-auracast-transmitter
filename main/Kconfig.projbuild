@@ -31,6 +31,26 @@ menu "AES67 Auracast bridge"
                 Off in test-tone mode: the internal I2S1 master changes DATA on the falling edge.
     endmenu
 
+    menu "I2C control (S31 = slave, protocol: components/ctrl_regs/include/auracast_i2c_regs.h)"
+        config AURACAST_I2C_ADDR
+            hex "7-bit slave address"
+            default 0x3A
+            range 0x08 0x77
+        config AURACAST_I2C_SDA_GPIO
+            int "SDA GPIO (J2-17)"
+            default 43
+        config AURACAST_I2C_SCL_GPIO
+            int "SCL GPIO (J2-18)"
+            default 44
+        config AURACAST_AUTOSTART
+            bool "Start broadcasting at boot with the power-on configuration (bench use without an I2C master)"
+            default n
+            help
+                Normally the S31 waits after boot until the I2C master has written the configuration and
+                sent START. With this option it starts at once with the power-on register values
+                (AURA_DEFAULT_* in auracast_i2c_regs.h: 24_2_1 mono Live). The I2C slave still runs.
+    endmenu
+
     choice AURACAST_SOURCE
         prompt "Audio source"
         default AURACAST_SOURCE_I2S
