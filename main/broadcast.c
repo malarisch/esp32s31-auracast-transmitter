@@ -50,7 +50,12 @@ static const char *TAG = "broadcast";
 #endif
 
 #if CONFIG_AURACAST_MODE_LIVE
-#error "Live mode is not implemented yet"
+/* Mono: the BIS has no Audio_Channel_Allocation (removed in source_create) */
+#define STREAM_COUNT 1
+#define SAMPLE_RATE  24000
+#define PBA_QUALITY  ESP_BLE_AUDIO_PBP_ANNOUNCEMENT_FEATURE_STANDARD_QUALITY
+ESP_BLE_AUDIO_BAP_LC3_BROADCAST_PRESET_24_2_1_DEFINE(s_preset, ESP_BLE_AUDIO_LOCATION_MONO_AUDIO, CONTEXT);
+#define PRESET_NAME "24_2_1"
 #else
 #define LOCATIONS (ESP_BLE_AUDIO_LOCATION_FRONT_LEFT | ESP_BLE_AUDIO_LOCATION_FRONT_RIGHT)
 #define STREAM_COUNT 2
@@ -216,6 +221,7 @@ static bool encrypted(void)
 
 static esp_err_t source_create(void)
 {
+#if !CONFIG_AURACAST_MODE_LIVE
     static uint8_t chan_left[] = {
         ESP_BLE_AUDIO_CODEC_DATA(ESP_BLE_AUDIO_CODEC_CFG_CHAN_ALLOC,
                                  EXAMPLE_BYTES_LIST_LE32(ESP_BLE_AUDIO_LOCATION_FRONT_LEFT))
@@ -224,6 +230,7 @@ static esp_err_t source_create(void)
         ESP_BLE_AUDIO_CODEC_DATA(ESP_BLE_AUDIO_CODEC_CFG_CHAN_ALLOC,
                                  EXAMPLE_BYTES_LIST_LE32(ESP_BLE_AUDIO_LOCATION_FRONT_RIGHT))
     };
+#endif
     static esp_ble_audio_bap_broadcast_source_cb_t source_cb = {
         .started = source_started_cb,
         .stopped = source_stopped_cb,
@@ -240,10 +247,22 @@ static esp_err_t source_create(void)
 
     for (int i = 0; i < STREAM_COUNT; i++) {
         stream_params[i].stream = &s_streams[i].stream;
+#if CONFIG_AURACAST_MODE_LIVE
+        stream_params[i].data = NULL;
+        stream_params[i].data_len = 0;
+#else
         stream_params[i].data = i == 0 ? chan_left : chan_right;
         stream_params[i].data_len = i == 0 ? sizeof(chan_left) : sizeof(chan_right);
+#endif
         esp_ble_audio_bap_stream_cb_register(&s_streams[i].stream, &s_stream_ops);
     }
+#if CONFIG_AURACAST_MODE_LIVE
+    /* A mono stream must not carry an Audio_Channel_Allocation LTV (Auracast transmitter guide) */
+    err = esp_ble_audio_codec_cfg_unset_val(&s_preset.codec_cfg, ESP_BLE_AUDIO_CODEC_CFG_CHAN_ALLOC);
+    if (err) {
+        ESP_LOGW(TAG, "removing the channel allocation failed, err %d", err);
+    }
+#endif
     subgroup.params_count = STREAM_COUNT;
     subgroup.params = stream_params;
     subgroup.codec_cfg = &s_preset.codec_cfg;

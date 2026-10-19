@@ -5,6 +5,13 @@ Firmware für das **ESP32-S31-Function-CoreBoard-1** (V1.0). Der ESP32-S31 empf�
 Auracast-Broadcast (Bluetooth LE Audio, LC3). Die Taktabweichung zwischen PTP und dem
 Modul-Quarz gleicht ein geregelter Software-Resampler aus.
 
+Zwei Sendemodi:
+
+- **Live / Hörgeräte (Default):** ein Mono-BIS (L+R)/2, LC3 24_2_1 (24 kHz, 60 Byte, Standard Quality), Kontext
+  *Live*, Immediate-Rendering-Flag, Presentation Delay 20 ms. Für Livesound, bei dem die Zuhörer auch den Raum
+  hören: Viele Hörgeräte empfangen nur Standard Quality, und die Latenz ist kleiner.
+- **HQ stereo:** zwei BIS links/rechts mit 48 kHz (48_2_1 / 48_4_1 / 48_6_1), Kontext *Media*, 40 ms.
+
 Design: [docs/superpowers/specs/2026-10-17-auracast-s31-design.md](docs/superpowers/specs/2026-10-17-auracast-s31-design.md)
 
 ## Verdrahtung (FPGA → Stiftleiste J2)
@@ -51,10 +58,14 @@ bricht auf diesem Board nach einigen Sekunden weg (esp-idf#19221).
 | I2S input → BCLK/WS/DATA GPIO | 40 / 42 / 39 | Pins an J2 |
 | Sample DATA on the falling BCLK edge | an | siehe I2S-Format; Kontrolle über `i2s bits=` |
 | Slave sampling clock (bclk_div) | 8 × BCLK | interner Abtasttakt des Slaves; verschiebt den Abtastzeitpunkt (16 war am FPGA schlechter) |
-| Input FIFO fill set point | 960 Frames (20 ms) | Sollwert des Driftreglers; bestimmt einen Teil der Latenz. Minimum 840 (darunter Unterläufe durch Block- und DMA-Granularität) |
+| Input FIFO fill set point | 840 Frames (17,5 ms) | Sollwert des Driftreglers; bestimmt einen Teil der Latenz. 840 ist das Minimum (darunter Unterläufe durch Block- und DMA-Granularität) |
+| Broadcast mode | Live | *Live / hearing aids* (24_2_1 mono) oder *HQ stereo* |
 | Broadcast name | `AES67 Auracast` | Name, den Empfänger anzeigen (Broadcast_Name) |
 | Broadcast code | leer | leer = unverschlüsselt, sonst max. 16 Byte |
-| LC3 broadcast preset | 48_4_1 | 48 kHz, 10 ms, 120 Byte (96 kbit/s pro Kanal); alternativ 48_2_1 / 48_6_1 |
+| LC3 broadcast preset | 48_4_1 | nur HQ: 48 kHz, 10 ms, 120 Byte (96 kbit/s pro Kanal); alternativ 48_2_1 / 48_6_1 |
+| Streaming context Live | Live: an, HQ: aus | *Live* statt *Media* in Streaming_Audio_Contexts |
+| Immediate rendering flag | Live: an, HQ: aus | Broadcast_Audio_Immediate_Rendering_Flag in der Public Broadcast Announcement: Empfänger rendern so früh, wie sie können |
+| Presentation delay | Live: 20 ms, HQ: 40 ms | 20–40 ms; 40 ms kann jeder Auracast-Empfänger, 20–40 ms jedes Hörgerät (HAP) |
 | TX power | +9 dBm | wird auf die nächstkleinere unterstützte Stufe abgerundet |
 | Audio source | I2S | `SYNTH` = 440/880 Hz direkt, ohne I2S (Empfänger testen) |
 | Debug: skip send / ignore completion | 0 | nur für Tests der Pacing-Selbstheilung |
@@ -121,7 +132,11 @@ dass es ein Bit zu spät ist. Bei einem Sender mit echten 32-Bit-Daten ist die M
 | 2026-10-17 | Falsche Rate 44,1 kHz (nach Review-Fix) | `RATE_ERROR` 0,5 s nach Signalbeginn mit „44100 Hz“ im Log, kein Abspielen, keine Unterläufe, Wiederholversuch alle 5,5 s |
 | 2026-10-17 | Jeder 500. Bestätigungs-Callback verworfen, 60 s | durchgehend `RUN`, Füllstand 960, `wd` unverändert — Pacing heilt sich über Sequenznummern |
 | 2026-10-19 | Empfang am Linux-PC (BlueZ 5.87 + PipeWire 1.6.2, MediaTek MT7902), Synth-Quelle | Auracast-Ankündigung (0x1852 + ID, 0x1856 HQ, Name) korrekt; BlueZ synchronisiert PA/BASE/BIG und legt 2 Transports an; PipeWire decodiert LC3: links 440,0 Hz, rechts 880,0 Hz, je −15 dBFS RMS, > 72 dB Abstand, keine Aussetzer in 6 s |
-| offen | Hörtest mit Consumer-Empfänger | z. B. LE-Audio-Kopfhörer (AirPods können kein Auracast) |
+| 2026-10-19 | Betrieb am FPGA (AES67, Musik) | I2S-Takt PTP-gerastet: `in_ppm` −0,7 … +2,5, Regler ±5 ppm um den Sollwert, alle Fehlerzähler 0. Daten erst nach Umstellen auf die fallende BCLK-Flanke sauber (siehe I2S-Format) |
+| 2026-10-19 | Live-Modus 24_2_1 mono, BlueZ | 1 Transport, 24 kHz/10 ms/60 B ohne Channel-Allocation, Location 0, PD 20000, Kontext Live (0x0040); PBA 0x1856 mit Feature SQ (0x02) und Metadaten `01 09` (Immediate Rendering); Rechenzeit max. 1,8 ms pro 10 ms (HQ: 4,9 ms) |
+| 2026-10-19 | Störungsfreiheit (Referenzvergleich mit `measure_latency.py`) | HQ und Live, 9 Aufzeichnungen à 20–60 s: 0 gestörte 10-ms-Blöcke, 0 verlorene SDUs |
+| 2026-10-19 | Kanalzuordnung am FPGA | BIS 1 (angekündigt links) trägt den **rechten** AES67-Kanal, BIS 2 den linken. Ursache offen (WS-Polarität FPGA ↔ ESP?) |
+| offen | Hörtest mit Hörgerät / Consumer-Empfänger | z. B. LE-Audio-Kopfhörer (AirPods können kein Auracast) |
 
 ### Empfang am Linux-PC nachvollziehen
 
@@ -142,10 +157,45 @@ remove <MAC>                     # nach einem Board-Reset
 scan le                          # findet "AES67 Auracast", legt sid0/bis1 und sid0/bis2 als Transports an
 transport.select /org/bluez/hci0/dev_<MAC>/sid0/bis1/fd0 /org/bluez/hci0/dev_<MAC>/sid0/bis2/fd1
 ```
-| offen | Betrieb am FPGA | Testton aus, FPGA an J2; `in_ppm`/`ppm` zeigen die reale Abweichung PTP ↔ Modul-Quarz |
 
-## Latenz (geschätzt)
+## Latenz (gemessen)
 
-FIFO-Sollwert 20 ms + Resampler 0,7 ms + LC3-Frame 10 ms + LC3-Lookahead ~2,5 ms + Transport ≤ 20 ms
-+ Presentation Delay 40 ms ≈ **75–95 ms** Ende-zu-Ende. Kleinere FIFO-Sollwerte senken die Latenz, lassen aber
-weniger Reserve für Jitter.
+`tools/measure_latency.py` schneidet mit einem `dumpcap` den AES67-Stream (den das FPGA am ESP ausgibt) und den
+Bluetooth-Monitor des PCs auf derselben Uhr mit, dekodiert L24 und LC3 (`liblc3`) und richtet beide per
+Kreuzkorrelation aus. PipeWire ist nicht im Messpfad. Zeitbezug: RTP-Timestamp = Erfassung des ersten Samples;
+das Paket ist 1 ms + 29 µs (Sender) + 12 µs (SG350) später am PC; das FPGA am ESP gibt jedes Sample 96 Samples (2 ms)
+nach der Erfassung als I2S aus.
+
+| Modus | FIFO | I2S-Eingang → SDU am PC | gerendert beim Hörgerät* |
+|---|---|---|---|
+| HQ 48_4_1, PD 40 ms (vorher) | 960 | 37,0 ms (BIS 1) / 40,3 ms (BIS 2) | 80,3 … 86,9 ms |
+| HQ 48_4_1, PD 40 ms | 840 | 34,5 / 37,8 ms | 77,8 … 84,4 ms |
+| Live 24_2_1, PD 20 ms | 960 | 42,8 ms | 62,8 … 64,0 ms |
+| Live 24_2_1, PD 20 ms | 900 | 41,6 ms | 61,6 … 62,7 ms |
+| **Live 24_2_1, PD 20 ms (Default)** | **840** | **40,3 ms** | **60,3 … 61,5 ms** |
+
+\* Untergrenze: Ankunft + Presentation Delay; Obergrenze: zusätzlich die BIG-Transportlatenz aus *BIG Sync
+Established* (HQ 6,6 ms, Live 1,2 ms). Mit Immediate Rendering dürfen Hörgeräte früher rendern
+(gerätespezifisch). Ab AES67-Erfassung kommen jeweils 2 ms dazu. Zwei Läufe je Einstellung lagen ≤ 0,1 ms auseinander.
+
+Die Strecke bis zur Ankunft enthält: FIFO-Sollwert (17,5–20 ms), LC3-Frame 10 ms, LC3-Algorithmus 2,5 ms, Resampler
+0,7 ms (Live 1,3 ms) und die Wartezeit in der Sende-Queue (2 SDUs, Takt der Sende-Bestätigungen). Im Live-Modus ist
+das Funkereignis kürzer, die Bestätigung kommt früher nach dem Anker und die nächste SDU wartet länger. Deshalb ist
+die Ankunft dort trotz kürzerer Transportlatenz später als bei HQ; gerendert ist Live wegen 20 statt 40 ms
+Presentation Delay trotzdem ~20 ms schneller.
+
+```bash
+/usr/bin/python3 tools/measure_latency.py --subscribe --seconds 20 --pd-us 20000 --fifo-frames 840
+/usr/bin/python3 tools/measure_latency.py --pcap capture.pcapng --pd-us 20000    # vorhandenen Mitschnitt auswerten
+/usr/bin/python3 -m unittest discover -s tools -p 'test_*.py'                    # Tests der PC-Werkzeuge
+```
+
+Voraussetzungen: `dumpcap` mit Capabilities (Gruppe `wireshark`), `liblc3.so.1`, numpy, der PC im AES67-Netz
+(`--iface`, `--group`). `--subscribe` startet `auracast_listen.py` innerhalb des Mitschnitts, damit auch *BIG Sync
+Established* (Transportlatenz) darin landet; dabei läuft das Audio über die Standard-Lautsprecher. Das Tool meldet je
+BIS außerdem, welchen AES67-Kanal es trägt, verlorene SDUs/Pakete und gestörte 10-ms-Blöcke. Gestört heißt: ein
+1-ms-Abschnitt mit SNR < 1 dB, der mindestens 6 dB mehr Fehler hat als liblc3 auf derselben Referenz; Stellen, die
+für LC3 bei dieser Bitrate einfach schwer sind, zählen so nicht.
+
+`tools/sine_check.py aufnahme.wav` prüft eine Aufnahme mit 440-Hz-Sinus blockweise (für Tests mit Sinus statt
+Musik).

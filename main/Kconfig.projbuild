@@ -31,11 +31,12 @@ menu "AES67 Auracast bridge"
                 Off in test-tone mode: the internal I2S1 master changes DATA on the falling edge.
         config AURACAST_FIFO_TARGET_FRAMES
             int "Input FIFO fill set point (frames @ 48 kHz)"
-            default 960
+            default 840
             range 840 3000
             help
                 Must cover one block (480) + one DMA block (240) + jitter: below ~760 frames
-                underruns appear (simulated with the measured tick and ISR jitter).
+                underruns appear (simulated with the measured tick and ISR jitter). 840 ran without
+                errors on the FPGA in both broadcast modes (2026-10-19).
     endmenu
 
     menu "Broadcast"

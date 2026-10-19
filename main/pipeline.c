@@ -182,6 +182,7 @@ static const char *const s_state_names[] = {"NO_SIGNAL", "PRIME", "RUN", "RATE_E
 static spsc_ring_t s_ring;
 static int32_t s_ring_buf[RING_FRAMES * 2];
 static int32_t s_in[IN_MAX_FRAMES * 2];
+static int32_t s_mono[IN_MAX_FRAMES];
 static resampler_t *s_rs;
 static drift_ctrl_t s_dc;
 static pipe_state_t s_st = PIPE_NO_SIGNAL;
@@ -246,6 +247,18 @@ static void source_init(void)
 #endif
 }
 
+/* Resampler input for frames read into s_in: stereo as is, or the (L+R)/2 downmix for one BIS */
+static const int32_t *mix_input(uint32_t frames)
+{
+    if (s_nch == 2) {
+        return s_in;
+    }
+    for (uint32_t i = 0; i < frames; i++) {
+        s_mono[i] = (s_in[2 * i] >> 1) + (s_in[2 * i + 1] >> 1);
+    }
+    return s_mono;
+}
+
 /* Read and discard n frames (consumer side) */
 static void ring_discard(uint32_t n)
 {
@@ -274,7 +287,7 @@ static void enter_run(int64_t now)
     /* Pre-load the resampler's look-ahead so its first pull takes a regular-sized block */
     uint32_t lookahead = resampler_input_needed(s_rs, s_out_frames) - FRAMES;
     lookahead = spsc_ring_read(&s_ring, s_in, lookahead);
-    resampler_push(s_rs, s_in, lookahead);
+    resampler_push(s_rs, mix_input(lookahead), lookahead);
 
     /* Then drop the excess so the control loop starts exactly at the set point (see test_drift_ctrl.c) */
     i2s_in_snapshot_t snap;
@@ -336,7 +349,7 @@ static bool run_step(int64_t now, const i2s_in_snapshot_t *snap)
         return false;
     }
     spsc_ring_read(&s_ring, s_in, need);
-    resampler_push(s_rs, s_in, need);
+    resampler_push(s_rs, mix_input(need), need);
     int32_t *const out[2] = {s_pcm[0], s_pcm[1]};
     resampler_pull(s_rs, out, s_out_frames);
 
