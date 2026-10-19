@@ -482,6 +482,9 @@ static void stats_task(void *arg)
                  (unsigned long)st.tick_us_min, (unsigned long)st.tick_us_max, st.tick_us_mean,
                  (unsigned long)w.proc_us_max, (unsigned long)st.sent, (unsigned long)esp_get_free_heap_size(),
                  st.bt_ppm);
+#if CONFIG_AURACAST_SOURCE_I2S
+        ESP_LOGI(TAG, "i2s bits=0x%08lx", (unsigned long)i2s_in_take_bit_mask());
+#endif
     }
 }
 

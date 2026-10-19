@@ -6,3 +6,4 @@ sdkconfig.old
 managed_components/
 .superpowers/
 logs/
+__pycache__/

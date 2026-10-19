@@ -32,5 +32,8 @@ typedef struct {
  */
 esp_err_t i2s_in_start(const i2s_in_cfg_t *cfg, spsc_ring_t *ring);
 
+/* OR of all raw 32-bit slot words since the last call (24-bit data: low byte must stay 0) */
+uint32_t i2s_in_take_bit_mask(void);
+
 /* Consistent snapshot of the input state (seqlock against the DMA interrupt) */
 void i2s_in_snapshot(i2s_in_snapshot_t *out);

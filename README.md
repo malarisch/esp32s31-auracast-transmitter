@@ -23,6 +23,12 @@ Pegel 3,3 V LVCMOS. Die GPIOs lassen sich in `idf.py menuconfig` → *AES67 Aura
 - Philips-I2S, ESP ist Slave (BCLK und WS kommen vom FPGA), kein MCLK
 - 48000 Hz, 2 Slots × 32 Bit (64 BCLK pro Frame)
 - 24-Bit-Daten MSB-first, linksbündig im 32-Bit-Slot
+- Der ESP tastet DATA per Default auf der **fallenden** BCLK-Flanke ab (`Sample DATA on the falling BCLK edge`):
+  Der FPGA wechselt DATA kurz nach der steigenden Flanke, und der S31-Slave tastet erst 80–120 ns nach der Flanke
+  ab (Synchronisierung mit 8 × BCLK). Auf der steigenden Flanke trifft er den Datenwechsel: Bits einen Takt zu
+  früh oder zufällig, hörbar als schnelles Klacken (~17 Hz, Schwebung zwischen den Takten). Ein DAC tastet direkt
+  auf der Flanke ab und merkt davon nichts. Ein Sender, der DATA I2S-konform auf der fallenden Flanke wechselt,
+  braucht die Option aus.
 
 ## Build & Flash
 
@@ -43,6 +49,8 @@ bricht auf diesem Board nach einigen Sekunden weg (esp-idf#19221).
 | Option | Default | Bedeutung |
 |---|---|---|
 | I2S input → BCLK/WS/DATA GPIO | 40 / 42 / 39 | Pins an J2 |
+| Sample DATA on the falling BCLK edge | an | siehe I2S-Format; Kontrolle über `i2s bits=` |
+| Slave sampling clock (bclk_div) | 8 × BCLK | interner Abtasttakt des Slaves; verschiebt den Abtastzeitpunkt (16 war am FPGA schlechter) |
 | Input FIFO fill set point | 960 Frames (20 ms) | Sollwert des Driftreglers; bestimmt einen Teil der Latenz. Minimum 840 (darunter Unterläufe durch Block- und DMA-Granularität) |
 | Broadcast name | `AES67 Auracast` | Name, den Empfänger anzeigen (Broadcast_Name) |
 | Broadcast code | leer | leer = unverschlüsselt, sonst max. 16 Byte |
@@ -88,6 +96,10 @@ pipeline: state=RUN fill=960.0 ppm=+41.62 in_ppm=+41.74 underrun=0 ovf=0 lost=0 
 | `heap` | freier Heap in Byte |
 | `bt_ppm` | Rate der SDU-Ticks gegenüber `esp_timer`, kumulativ seit Streamstart |
 
+Darunter steht alle 5 s `i2s bits=0x…`, das ODER aller rohen 32-Bit-Slotwörter im Fenster. Bei 24-Bit-Daten muss
+das untere Byte `00` sein. `…80` bedeutet, dass ein Bit zu früh abgetastet wird (BCLK-Flanke falsch), `…01`,
+dass es ein Bit zu spät ist. Bei einem Sender mit echten 32-Bit-Daten ist die Maske nicht aussagekräftig.
+
 ## Messwerte
 
 | Datum | Was | Ergebnis |
@@ -117,10 +129,18 @@ Voraussetzungen: BlueZ mit `Experimental = true` und `KernelExperimental = 6fbaf
 in `/etc/bluetooth/main.conf`, Controller mit `sync-receiver` (`btmgmt info`), PipeWire mit LC3.
 
 ```bash
-bluetoothctl                     # dann:
+tools/auracast_listen.py         # abonniert "AES67 Auracast", bis Ctrl-C (--name, --address, --keep-scanning)
+```
+
+Das Skript entfernt ein altes Geräteobjekt (BlueZ synchronisiert nach einem Board-Reset sonst nicht neu), scannt,
+wählt beide BIS aus und abonniert von selbst neu, wenn der Broadcast wegfällt. PipeWire bietet danach je BIS eine
+Quelle `bluez_input.<MAC>…` an, die WirePlumber meist sofort auf die Standard-Lautsprecher legt (`pw-link -d` trennt,
+`pw-record --target …` nimmt auf). Von Hand geht dasselbe mit `bluetoothctl`:
+
+```bash
+remove <MAC>                     # nach einem Board-Reset
 scan le                          # findet "AES67 Auracast", legt sid0/bis1 und sid0/bis2 als Transports an
 transport.select /org/bluez/hci0/dev_<MAC>/sid0/bis1/fd0 /org/bluez/hci0/dev_<MAC>/sid0/bis2/fd1
-# PipeWire bietet danach je BIS eine Quelle bluez_input.<MAC>… an (pw-record --target …)
 ```
 | offen | Betrieb am FPGA | Testton aus, FPGA an J2; `in_ppm`/`ppm` zeigen die reale Abweichung PTP ↔ Modul-Quarz |
 

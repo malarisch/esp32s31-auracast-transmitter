@@ -26,11 +26,18 @@ static volatile int64_t s_t_last_isr_us;
 static volatile uint64_t s_frames_total;
 static volatile uint32_t s_overflow_frames;
 static volatile uint32_t s_ring_w;   /* ring write index right after this block */
+static volatile uint32_t s_bits_or;  /* OR of all raw slot words, shows the bit alignment */
 
 static bool on_recv(i2s_chan_handle_t handle, i2s_event_data_t *event, void *user_ctx)
 {
     uint32_t frames = event->size / (2 * sizeof(int32_t));
     uint32_t written = spsc_ring_write(s_ring, event->dma_buf, frames);
+    const uint32_t *w = event->dma_buf;
+    uint32_t bits = 0;
+    for (uint32_t i = 0; i < 2 * frames; i++) {
+        bits |= w[i];
+    }
+    s_bits_or |= bits;
     int64_t now = esp_timer_get_time();
 
     atomic_fetch_add_explicit(&s_seq, 1, memory_order_acq_rel);
@@ -68,6 +75,13 @@ esp_err_t i2s_in_start(const i2s_in_cfg_t *cfg, spsc_ring_t *ring)
      * use the APLL. Its exact frequency does not matter in slave mode.
      */
     std_cfg.clk_cfg.clk_src = I2S_CLK_SRC_APLL;
+    std_cfg.clk_cfg.bclk_div = CONFIG_AURACAST_I2S_BCLK_DIV;
+#if CONFIG_AURACAST_I2S_BCLK_INV
+    std_cfg.gpio_cfg.invert_flags.bclk_inv = true;
+#define BCLK_EDGE ", BCLK inverted"
+#else
+#define BCLK_EDGE ""
+#endif
     ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_rx, &std_cfg), TAG, "init std");
 
     i2s_event_callbacks_t cbs = {
@@ -75,9 +89,17 @@ esp_err_t i2s_in_start(const i2s_in_cfg_t *cfg, spsc_ring_t *ring)
     };
     ESP_RETURN_ON_ERROR(i2s_channel_register_event_callback(s_rx, &cbs, NULL), TAG, "callbacks");
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_rx), TAG, "enable");
-    ESP_LOGI(TAG, "slave RX on BCLK=%d WS=%d DIN=%d, %lu Hz", cfg->bclk_gpio, cfg->ws_gpio,
-             cfg->din_gpio, (unsigned long)cfg->sample_rate_hz);
+    ESP_LOGI(TAG, "slave RX on BCLK=%d WS=%d DIN=%d, %lu Hz, sampling clock %d x BCLK%s", cfg->bclk_gpio,
+             cfg->ws_gpio, cfg->din_gpio, (unsigned long)cfg->sample_rate_hz, CONFIG_AURACAST_I2S_BCLK_DIV,
+             BCLK_EDGE);
     return ESP_OK;
+}
+
+uint32_t i2s_in_take_bit_mask(void)
+{
+    uint32_t bits = s_bits_or;
+    s_bits_or = 0;
+    return bits;
 }
 
 void i2s_in_snapshot(i2s_in_snapshot_t *out)

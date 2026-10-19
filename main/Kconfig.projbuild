@@ -10,6 +10,25 @@ menu "AES67 Auracast bridge"
         config AURACAST_I2S_DIN_GPIO
             int "DATA GPIO (J2-21)"
             default 39
+        config AURACAST_I2S_BCLK_DIV
+            int "Slave sampling clock in multiples of BCLK"
+            default 8
+            range 8 32
+            help
+                The slave synchronises BCLK/WS/DATA to an internal clock of N x BCLK. With N = 8
+                (24.576 MHz) the sampling point lands 80..120 ns after the BCLK edge and can hit
+                the DATA transition, depending on the transmitter's output timing.
+        config AURACAST_I2S_BCLK_INV
+            bool "Sample DATA on the falling BCLK edge (invert BCLK input)"
+            depends on !AURACAST_TEST_TONE
+            default y
+            help
+                The FPGA changes DATA shortly after the rising BCLK edge. A DAC samples exactly on
+                the edge and still sees the old bit, but the S31 slave samples 80..120 ns later
+                (synchroniser, see bclk_div) and hits the transition: one bit early or random,
+                heard as periodic clicks. Sampling on the falling edge is in the middle of the bit.
+                Check: the "i2s bits=" log line must end in 00 for 24-bit data (80 = one bit early).
+                Off in test-tone mode: the internal I2S1 master changes DATA on the falling edge.
         config AURACAST_FIFO_TARGET_FRAMES
             int "Input FIFO fill set point (frames @ 48 kHz)"
             default 960
