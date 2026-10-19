@@ -23,7 +23,7 @@ typedef struct resampler resampler_t;
 resampler_t *resampler_create(uint8_t channels, uint32_t max_out_frames);
 
 /*
- * Same with decimation by decim (1 or 2): output rate = input rate / decim, anti-alias cut-off at
+ * Same with decimation by decim (1, 2 or 3): output rate = input rate / decim, anti-alias cut-off at
  * 0.45 x the output rate, decim * RESAMPLER_TAPS taps. The ratio keeps its meaning (about 1.0),
  * resampler_input_needed() counts input frames.
  */

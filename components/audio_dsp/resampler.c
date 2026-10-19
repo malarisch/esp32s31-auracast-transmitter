@@ -14,9 +14,9 @@
 
 #include "resampler.h"
 
-#define CUTOFF      0.45    /* normalized to the output rate: 21.6 kHz at 48 kHz, 10.8 kHz at 24 kHz */
+#define CUTOFF      0.45    /* normalized to the output rate: 21.6 kHz at 48 kHz, 10.8 at 24, 7.2 at 16 */
 #define KAISER_BETA 9.5
-#define MAX_DECIM   2
+#define MAX_DECIM   3
 
 /* Q32.32 position: the top log2(PHASES) fraction bits select the phase, the rest interpolate */
 #define PHASE_SHIFT     (32 - 7)

@@ -49,6 +49,10 @@ static uint64_t run(signal_fn sig, double (*ratio_of)(uint32_t), uint32_t blocks
     const uint32_t blk = BLOCK / g_decim;
     resampler_t *rs = resampler_create_decim(2, blk, g_decim);
     CHECK(rs != NULL);
+    if (rs == NULL) {
+        *pull_ok = 0;
+        return 0;
+    }
     uint64_t k = 0;
     int32_t *const out[2] = {blk_l, blk_r};
     *pull_ok = 1;
@@ -145,15 +149,15 @@ static void test_decim2_sine_9k(void)
     check_sine_decim(9000, 1.0 + 100e-6, 70.0, 2);
 }
 
-/* 14 kHz is above the 24 kHz output's Nyquist frequency: it would alias to 10 kHz */
-static void test_decim2_alias_14k(void)
+/* A tone above the output's Nyquist frequency must be filtered out, not aliased into the band */
+static void check_alias(double f, uint8_t decim)
 {
     int ok;
-    g_f = 14000;
+    g_f = f;
     g_amp = 0.5;
     g_ratio = 1.0 + 100e-6;
-    g_decim = 2;
-    run(sig_sine, ratio_const, MAX_OUT / (BLOCK / 2), &ok);
+    g_decim = decim;
+    run(sig_sine, ratio_const, MAX_OUT / (BLOCK / decim), &ok);
     g_decim = 1;
     CHECK(ok);
     const size_t skip = 4800;
@@ -162,15 +166,19 @@ static void test_decim2_alias_14k(void)
         sum += out_l[m] * out_l[m];
     }
     double rel_db = 20.0 * log10(sqrt(sum / (MAX_OUT - skip)) / (0.5 / sqrt(2.0)) + 1e-30);
-    printf("  alias level %.1f dB (max -60)\n", rel_db);
+    printf("  f=%.0f decim=%u alias level %.1f dB (max -60)\n", f, decim, rel_db);
     CHECK(rel_db <= -60.0);
 }
 
-/* Decimating: input consumed must match 2 * output * ratio over a long run */
-static void test_decim2_frame_accounting(void)
+/* Decimating: input consumed must match decim * output * ratio over a long run */
+static void check_decim_accounting(uint8_t decim)
 {
-    const uint32_t blk = BLOCK / 2;
-    resampler_t *rs = resampler_create_decim(2, blk, 2);
+    const uint32_t blk = BLOCK / decim;
+    resampler_t *rs = resampler_create_decim(2, blk, decim);
+    CHECK(rs != NULL);
+    if (rs == NULL) {
+        return;
+    }
     int32_t *const out[2] = {blk_l, blk_r};
     const double r = 1.0 + 41.7e-6;
     uint64_t pushed = 0;
@@ -185,11 +193,44 @@ static void test_decim2_frame_accounting(void)
         short_pulls += resampler_pull(rs, out, blk) != blk;
         pushed += need;
     }
-    double expect = 2.0 * blk * 6000.0 * r;
-    printf("  pushed=%llu expected=%.1f short_pulls=%u\n", (unsigned long long)pushed, expect, short_pulls);
+    double expect = (double)decim * blk * 6000.0 * r;
+    printf("  decim=%u pushed=%llu expected=%.1f short_pulls=%u\n", decim, (unsigned long long)pushed, expect,
+           short_pulls);
     CHECK(short_pulls == 0);
-    CHECK(fabs((double)pushed - expect) <= 2 * RESAMPLER_TAPS + 2);
+    CHECK(fabs((double)pushed - expect) <= (double)decim * RESAMPLER_TAPS + 2);
     resampler_destroy(rs);
+}
+
+/* 14 kHz is above the 24 kHz output's Nyquist frequency: it would alias to 10 kHz */
+static void test_decim2_alias_14k(void)
+{
+    check_alias(14000, 2);
+}
+
+static void test_decim2_frame_accounting(void)
+{
+    check_decim_accounting(2);
+}
+
+static void test_decim3_sine_1k(void)
+{
+    check_sine_decim(1000, 1.0 + 100e-6, 90.0, 3);
+}
+
+static void test_decim3_sine_6k(void)
+{
+    check_sine_decim(6000, 1.0 + 100e-6, 70.0, 3);
+}
+
+/* 10 kHz is above the 16 kHz output's Nyquist frequency: it would alias to 6 kHz */
+static void test_decim3_alias_10k(void)
+{
+    check_alias(10000, 3);
+}
+
+static void test_decim3_frame_accounting(void)
+{
+    check_decim_accounting(3);
 }
 
 static void test_input_needed_sufficient(void)
@@ -337,5 +378,9 @@ int main(void)
     RUN_TEST(test_decim2_sine_9k);
     RUN_TEST(test_decim2_alias_14k);
     RUN_TEST(test_decim2_frame_accounting);
+    RUN_TEST(test_decim3_sine_1k);
+    RUN_TEST(test_decim3_sine_6k);
+    RUN_TEST(test_decim3_alias_10k);
+    RUN_TEST(test_decim3_frame_accounting);
     TEST_MAIN_RETURN();
 }
