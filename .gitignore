@@ -1,6 +1,7 @@
 docs/**
 build/
 build_host/
+build_host_ctrl/
 sdkconfig
 sdkconfig.old
 managed_components/
