@@ -26,6 +26,17 @@ def pink(n, seed=1):
     return 0.2 * x / np.std(x)
 
 
+def brown(n, seed=1):
+    """1/f^2 noise: falls off towards high frequencies like music, so LC3 reaches music-like SNRs."""
+    rng = np.random.default_rng(seed)
+    w = np.fft.rfft(rng.standard_normal(n))
+    f = np.arange(len(w))
+    w[1:] /= np.maximum(f[1:], 20)
+    w[0] = 0
+    x = np.fft.irfft(w, n)
+    return 0.2 * x / np.std(x)
+
+
 def lowpass_decimate2(x):
     """Reference decimation for test data: brick-wall FFT low-pass at 11 kHz, then every 2nd sample."""
     X = np.fft.rfft(x)
@@ -66,7 +77,9 @@ class AlignTest(unittest.TestCase):
         self.assertLess(al.peak_ratio, 1.5)
 
 
-class GlitchTest(unittest.TestCase):
+class CandidateTest(unittest.TestCase):
+    """latency.glitch_blocks(): candidates by SNR and error level."""
+
     def test_glitch_blocks(self):
         fs = 24000
         ref = pink(3 * fs, seed=7)
@@ -115,7 +128,7 @@ ARGS = types.SimpleNamespace(group="239.69.0.1", port=5004, channels=2, pd_us=20
                              transport_latency_us=None)
 
 
-class QuietPassageTest(unittest.TestCase):
+class CandidateQuietTest(unittest.TestCase):
     def test_quiet_subblock_not_a_glitch(self):
         """Codec noise in a short quiet stretch of a loud block is not a click."""
         fs = 24000
@@ -145,15 +158,77 @@ class QuietPassageTest(unittest.TestCase):
         self.assertEqual(list(latency.glitch_blocks(ref, rx, fs)), [150])
 
 
-class WarmupTest(unittest.TestCase):
+class GlitchTest(unittest.TestCase):
+    """measure_latency.glitches(): blocks where the received audio is much worse than liblc3 on the reference."""
+
+    def esp_like(self, ref, fs, nbytes):
+        """What an ideal transmitter would deliver: ref through liblc3, re-aligned by the codec delay."""
+        n, d = fs // 100, lc3.delay_samples(fs)
+        enc, dec = lc3.Encoder(fs), lc3.Decoder(fs)
+        src = np.concatenate([ref[d:], np.zeros(d)]).astype(np.float32)
+        return np.concatenate([dec.decode(enc.encode(src[k * n:(k + 1) * n], nbytes)) for k in range(len(src) // n)])
+
     def test_decoder_warmup_not_a_glitch(self):
         fs = 48000
         ref = pink(2 * fs, seed=9)
-        rx = ref + np.random.default_rng(10).standard_normal(len(ref)) * 1e-4
+        rx = self.esp_like(ref, fs, 120)
         rx[:120] = 0.0    # a cold LC3 decoder outputs ~2.5 ms of silence first
-        self.assertEqual(measure_latency.glitches(ref, rx, fs), [])
-        rx[48000:48010] = 0.9
-        self.assertEqual(measure_latency.glitches(ref, rx, fs), [100])
+        self.assertEqual(measure_latency.glitches(ref, rx, fs, 120), [])
+
+    def test_click_and_dropout(self):
+        fs = 24000
+        ref = brown(3 * fs, seed=21)
+        rx = self.esp_like(ref, fs, 60)
+        rx[100 * 240 + 50:100 * 240 + 56] = 0.9      # click
+        rx[200 * 240 + 60:200 * 240 + 108] = 0.0     # 2 ms dropout
+        self.assertEqual(measure_latency.glitches(ref, rx, fs, 60), [100, 200])
+
+
+def synth_capture(delay_s, drop_sdus=(), drop_rtp=(), seconds=4, hq_bis=None, burst_at=None, click_at=None):
+    """RTP stream plus one mono 24_2_1 BIS; SDU n arrives delay_s after the I2S time of its first sample.
+    hq_bis=(c0, c1): instead two 48_4_1 BIS carrying reference channels c0 and c1 (L and R differ).
+    burst_at=k: block k of the programme is quiet, then a loud noise attack: every LC3 encoder spreads
+                pre-echo over the quiet half.
+    click_at=k: a click in block k of the transmitted audio only (an error on the ESP side)."""
+    ref = pink((seconds + 1) * FS, seed=11)
+    if burst_at is not None:
+        k = burst_at * 480
+        ref[k:k + 240] *= 0.01
+        ref[k + 240:k + 480] += np.random.default_rng(20).standard_normal(240) * 0.5
+    stereo = np.stack([ref, ref if hq_bis is None else pink((seconds + 1) * FS, seed=13)], axis=1)
+    pk = []
+    t_cap0 = 100.0            # PTP capture time of ts=TS0, expressed on the PC clock
+    ts0 = 0x7FFF0000
+    rng = np.random.default_rng(12)
+    for k in range(seconds * 1000):
+        if k in drop_rtp:
+            continue
+        blk = np.clip(np.round(stereo[48 * k:48 * k + 48] * 8388607), -8388608, 8388607).astype(np.int32)
+        payload = b"".join(int(v & 0xFFFFFF).to_bytes(3, "big") for v in blk.reshape(-1))
+        t = t_cap0 + 48 * k / FS + 1.041e-3 + rng.exponential(60e-6)
+        pk.append(capture.Packet(0, 1, t, udp_frame("239.69.0.1", 5004, rtp(k & 0xFFFF, (ts0 + 48 * k) & 0xFFFFFFFF,
+                                                                             payload))))
+    if hq_bis is None:
+        tx = lowpass_decimate2(ref)
+        if click_at is not None:
+            tx[click_at * 240 + 100:click_at * 240 + 106] = 0.9
+        streams = [(0x0010, lc3.Encoder(24000), tx, 240, 60)]
+    else:
+        streams = [(0x0010 + i, lc3.Encoder(FS), stereo[:, c], 480, 120) for i, c in enumerate(hq_bis)]
+    i2s0 = t_cap0 + 2e-3      # I2S time of ref[0]
+    for n in range(seconds * 100 - 10):
+        for handle, enc, x, nf, nb in streams:
+            sdu = enc.encode(x[nf * n:nf * n + nf], nb)
+            if n in drop_sdus:
+                continue
+            t = i2s0 + n * 0.01 + delay_s + rng.exponential(30e-6)
+            pk.append(capture.Packet(1, 254, t, iso_rx(handle, n, sdu)))
+    pk.sort(key=lambda p: p.t)
+    return pk
+
+
+ARGS = types.SimpleNamespace(group="239.69.0.1", port=5004, channels=2, pd_us=20000, fifo_frames=960,
+                             transport_latency_us=None)
 
 
 class EvaluateTest(unittest.TestCase):
@@ -180,6 +255,15 @@ class EvaluateTest(unittest.TestCase):
             self.assertAlmostEqual(c.i2s_to_arrival_s, 0.0325, delta=100e-6)
             self.assertFalse(c.ambiguous)
             self.assertEqual(c.glitch_blocks, [])   # cold decoder start on a running stream is not a glitch
+
+    def test_codec_limited_burst_not_a_glitch(self):
+        r = measure_latency.evaluate(synth_capture(0.0300, burst_at=150), ARGS)
+        self.assertEqual(r.channels[0].glitch_blocks, [])
+
+    def test_click_on_esp_side_is_a_glitch(self):
+        r = measure_latency.evaluate(synth_capture(0.0300, click_at=200), ARGS)
+        self.assertEqual(len(r.channels[0].glitch_blocks), 1)
+        self.assertLessEqual(abs(r.channels[0].glitch_blocks[0] - 200), 1)   # block index on the rx timeline
 
     def test_no_iso_packets_message(self):
         only_rtp = [p for p in synth_capture(0.03, seconds=1) if p.linktype == 1]

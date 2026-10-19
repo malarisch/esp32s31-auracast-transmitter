@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Timing fits, alignment and glitch detection for measure_latency.py (numpy only)."""
+"""Timing fits, alignment and glitch candidates for measure_latency.py (numpy only)."""
 
 from typing import NamedTuple
 

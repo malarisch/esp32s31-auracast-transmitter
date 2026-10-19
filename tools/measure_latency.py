@@ -74,10 +74,42 @@ def _reference(rtp, channels):
     return ref, missing
 
 
-def glitches(ref_aligned, rx, fs) -> list:
-    """Disturbed 10 ms blocks, skipping the first frame: a cold decoder starts with ~2.5 ms of silence."""
-    n = int(fs) // 100
-    return [int(g) + 1 for g in latency.glitch_blocks(ref_aligned[n:], rx[n:], fs)]
+CONFIRM_DB = 6.0
+SILENT_DB = -50.0
+
+
+def glitches(ref_aligned, rx, fs, sdu_len) -> list:
+    """Disturbed 10 ms blocks.
+
+    Candidates come from latency.glitch_blocks() (a 1 ms sub-block with SNR < 1 dB and an error far above
+    the median). A candidate counts only if, in its worst sub-block, the received audio has at least
+    CONFIRM_DB more error than liblc3 achieves on the same reference with the same frame size: passages
+    that are simply hard for LC3 at this bit rate are not clicks. The first block is skipped (a cold
+    decoder starts with ~2.5 ms of silence)."""
+    fs = int(round(fs))
+    n, sub, d = fs // 100, fs // 1000, lc3.delay_samples(fs)
+    ref_aligned = np.asarray(ref_aligned, dtype=np.float64)
+    cand = [int(k) + 1 for k in latency.glitch_blocks(ref_aligned[n:], rx[n:], fs)]
+    if not cand:
+        return []
+    # ref_aligned already includes the codec delay; undo it so our frames match the transmitter's
+    src = np.concatenate([ref_aligned[d:], np.zeros(d)]).astype(np.float32)
+    enc, dec = lc3.Encoder(fs), lc3.Decoder(fs)
+    last = max(cand) + 1
+    ideal = np.concatenate([dec.decode(enc.encode(src[k * n:(k + 1) * n], sdu_len)) for k in range(last)])
+    out = []
+    for k in cand:
+        worst = -np.inf
+        for j in range(k * n, (k + 1) * n - sub + 1, sub):
+            r = ref_aligned[j:j + sub]
+            if np.mean(r ** 2) < 10 ** (SILENT_DB / 10):
+                continue
+            e_rx = np.mean((rx[j:j + sub] - r) ** 2)
+            e_id = max(np.mean((ideal[j:j + sub] - r) ** 2), 1e-20)
+            worst = max(worst, 10 * np.log10(max(e_rx, 1e-20) / e_id))
+        if worst >= CONFIRM_DB:
+            out.append(k)
+    return out
 
 
 def _sources(ref):
@@ -138,7 +170,7 @@ def evaluate(packets, args) -> Report:
             if best is None or nc > best[3]:
                 best = (name, ra, al, nc)
         name, ra, al, _ = best
-        gl = glitches(ra, rx, rx_fs)
+        gl = glitches(ra * al.gain, rx, fs, sdu_len)
         results.append(ChannelResult(h, name, fs, sdu_len, al.lag_s, al.peak_ratio,
                                      al.peak_ratio < latency.AMBIGUOUS_RATIO, al.gain, len(seg), missing,
                                      gl, len(rx) // (fs // 100)))
