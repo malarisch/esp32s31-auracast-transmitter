@@ -35,8 +35,7 @@ idf.py -p $PORT flash
 mkdir -p logs && python tools/serial_log.py --port $PORT --seconds 10 --reset | tee logs/boot.log
 ```
 
-Flashen und Logs laufen über den **USB-UART-Port (CP2102N)** mit **921600 Baud** (`serial_log.py` nutzt das als Default;
-die ROM-Zeilen am Anfang kommen mit 115200 Baud und erscheinen als Zeichensalat — beim Auswerten `grep -a` verwenden). Der USB-Serial/JTAG-Port
+Flashen und Logs laufen über den **USB-UART-Port (CP2102N)** mit **115200 Baud** (Default von `serial_log.py`). Der USB-Serial/JTAG-Port
 bricht auf diesem Board nach einigen Sekunden weg (esp-idf#19221).
 
 ## Konfiguration (menuconfig → *AES67 Auracast bridge*)

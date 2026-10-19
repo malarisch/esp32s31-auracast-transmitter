@@ -19,7 +19,7 @@ def main() -> int:
     parser.add_argument('--port', required=True)
     parser.add_argument('--seconds', type=float, required=True)
     parser.add_argument('--reset', action='store_true')
-    parser.add_argument('--baud', type=int, default=921600)
+    parser.add_argument('--baud', type=int, default=115200)
     args = parser.parse_args()
 
     ser = serial.Serial()
