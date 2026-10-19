@@ -21,12 +21,19 @@ typedef struct resampler resampler_t;
 
 /* Allocates once; no allocation afterwards. Returns NULL on failure. */
 resampler_t *resampler_create(uint8_t channels, uint32_t max_out_frames);
+
+/*
+ * Same with decimation by decim (1 or 2): output rate = input rate / decim, anti-alias cut-off at
+ * 0.45 x the output rate, decim * RESAMPLER_TAPS taps. The ratio keeps its meaning (about 1.0),
+ * resampler_input_needed() counts input frames.
+ */
+resampler_t *resampler_create_decim(uint8_t channels, uint32_t max_out_frames, uint8_t decim);
 void resampler_destroy(resampler_t *rs);
 
 /* Zero the history and restart at position 0. */
 void resampler_reset(resampler_t *rs);
 
-/* Input frames consumed per output frame; valid range (0.99, 1.01). */
+/* Input frames consumed per output frame, divided by decim; valid range (0.99, 1.01). */
 void resampler_set_ratio(resampler_t *rs, double ratio);
 
 /* Frames to push so that resampler_pull(out_frames) returns out_frames. */

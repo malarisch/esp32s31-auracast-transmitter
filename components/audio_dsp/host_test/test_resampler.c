@@ -22,6 +22,7 @@ typedef double (*signal_fn)(uint64_t k);
 
 static double g_f;
 static double g_amp;
+static uint8_t g_decim = 1;   /* output rate = FS / g_decim */
 
 static double sig_sine(uint64_t k)
 {
@@ -40,19 +41,20 @@ static int32_t to_i32(double v)
 }
 
 /*
- * Run `blocks` blocks of BLOCK output frames. ratio_of(block) supplies the ratio per block.
+ * Run `blocks` blocks of BLOCK / g_decim output frames. ratio_of(block) supplies the ratio per block.
  * Left output (normalized to +-1.0) goes to out_l. Returns frames pushed in total.
  */
 static uint64_t run(signal_fn sig, double (*ratio_of)(uint32_t), uint32_t blocks, int *pull_ok)
 {
-    resampler_t *rs = resampler_create(2, BLOCK);
+    const uint32_t blk = BLOCK / g_decim;
+    resampler_t *rs = resampler_create_decim(2, blk, g_decim);
     CHECK(rs != NULL);
     uint64_t k = 0;
     int32_t *const out[2] = {blk_l, blk_r};
     *pull_ok = 1;
     for (uint32_t b = 0; b < blocks; b++) {
         resampler_set_ratio(rs, ratio_of(b));
-        uint32_t need = resampler_input_needed(rs, BLOCK);
+        uint32_t need = resampler_input_needed(rs, blk);
         if (need > MAX_IN) {
             *pull_ok = 0;
             break;
@@ -63,13 +65,13 @@ static uint64_t run(signal_fn sig, double (*ratio_of)(uint32_t), uint32_t blocks
             in_buf[2 * i + 1] = v;
         }
         resampler_push(rs, in_buf, need);
-        uint32_t got = resampler_pull(rs, out, BLOCK);
-        if (got != BLOCK) {
+        uint32_t got = resampler_pull(rs, out, blk);
+        if (got != blk) {
             *pull_ok = 0;
         }
-        for (uint32_t i = 0; i < BLOCK; i++) {
-            if ((size_t)b * BLOCK + i < MAX_OUT) {
-                out_l[(size_t)b * BLOCK + i] = blk_l[i] / 2147483648.0;
+        for (uint32_t i = 0; i < blk; i++) {
+            if ((size_t)b * blk + i < MAX_OUT) {
+                out_l[(size_t)b * blk + i] = blk_l[i] / 2147483648.0;
             }
             if (blk_l[i] != blk_r[i]) {
                 *pull_ok = 0; /* identical L/R input must give identical L/R output */
@@ -87,18 +89,25 @@ static double ratio_const(uint32_t b)
     return g_ratio;
 }
 
-static void check_sine(double f, double ratio, double min_db)
+static void check_sine_decim(double f, double ratio, double min_db, uint8_t decim)
 {
     int ok;
     g_f = f;
     g_amp = 0.5;
     g_ratio = ratio;
-    run(sig_sine, ratio_const, MAX_OUT / BLOCK, &ok);
+    g_decim = decim;
+    run(sig_sine, ratio_const, MAX_OUT / (BLOCK / decim), &ok);
+    g_decim = 1;
     CHECK(ok);
     const size_t skip = 4800;
-    double d = sinad_db(out_l + skip, MAX_OUT - skip, 2.0 * M_PI * f * ratio / FS);
-    printf("  f=%.0f ratio=1%+.1fppm sinad=%.1f dB (min %.0f)\n", f, (ratio - 1.0) * 1e6, d, min_db);
+    double d = sinad_db(out_l + skip, MAX_OUT - skip, 2.0 * M_PI * f * ratio * decim / FS);
+    printf("  f=%.0f ratio=1%+.1fppm decim=%u sinad=%.1f dB (min %.0f)\n", f, (ratio - 1.0) * 1e6, decim, d, min_db);
     CHECK(d >= min_db);
+}
+
+static void check_sine(double f, double ratio, double min_db)
+{
+    check_sine_decim(f, ratio, min_db, 1);
 }
 
 static void test_sine_1k_unity(void)
@@ -124,6 +133,63 @@ static void test_sine_10k(void)
 static void test_sine_18k(void)
 {
     check_sine(18000, 1.0 + 100e-6, 80.0);
+}
+
+static void test_decim2_sine_1k(void)
+{
+    check_sine_decim(1000, 1.0 + 100e-6, 90.0, 2);
+}
+
+static void test_decim2_sine_9k(void)
+{
+    check_sine_decim(9000, 1.0 + 100e-6, 70.0, 2);
+}
+
+/* 14 kHz is above the 24 kHz output's Nyquist frequency: it would alias to 10 kHz */
+static void test_decim2_alias_14k(void)
+{
+    int ok;
+    g_f = 14000;
+    g_amp = 0.5;
+    g_ratio = 1.0 + 100e-6;
+    g_decim = 2;
+    run(sig_sine, ratio_const, MAX_OUT / (BLOCK / 2), &ok);
+    g_decim = 1;
+    CHECK(ok);
+    const size_t skip = 4800;
+    double sum = 0.0;
+    for (size_t m = skip; m < MAX_OUT; m++) {
+        sum += out_l[m] * out_l[m];
+    }
+    double rel_db = 20.0 * log10(sqrt(sum / (MAX_OUT - skip)) / (0.5 / sqrt(2.0)) + 1e-30);
+    printf("  alias level %.1f dB (max -60)\n", rel_db);
+    CHECK(rel_db <= -60.0);
+}
+
+/* Decimating: input consumed must match 2 * output * ratio over a long run */
+static void test_decim2_frame_accounting(void)
+{
+    const uint32_t blk = BLOCK / 2;
+    resampler_t *rs = resampler_create_decim(2, blk, 2);
+    int32_t *const out[2] = {blk_l, blk_r};
+    const double r = 1.0 + 41.7e-6;
+    uint64_t pushed = 0;
+    uint32_t short_pulls = 0;
+    resampler_set_ratio(rs, r);
+    for (uint32_t b = 0; b < 6000; b++) {
+        uint32_t need = resampler_input_needed(rs, blk);
+        for (uint32_t i = 0; i < 2 * need; i++) {
+            in_buf[i] = 0;
+        }
+        resampler_push(rs, in_buf, need);
+        short_pulls += resampler_pull(rs, out, blk) != blk;
+        pushed += need;
+    }
+    double expect = 2.0 * blk * 6000.0 * r;
+    printf("  pushed=%llu expected=%.1f short_pulls=%u\n", (unsigned long long)pushed, expect, short_pulls);
+    CHECK(short_pulls == 0);
+    CHECK(fabs((double)pushed - expect) <= 2 * RESAMPLER_TAPS + 2);
+    resampler_destroy(rs);
 }
 
 static void test_input_needed_sufficient(void)
@@ -267,5 +333,9 @@ int main(void)
     RUN_TEST(test_varying_ratio_accounting);
     RUN_TEST(test_ratio_toggle_no_jump);
     RUN_TEST(test_fullscale_square_no_wrap);
+    RUN_TEST(test_decim2_sine_1k);
+    RUN_TEST(test_decim2_sine_9k);
+    RUN_TEST(test_decim2_alias_14k);
+    RUN_TEST(test_decim2_frame_accounting);
     TEST_MAIN_RETURN();
 }
