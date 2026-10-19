@@ -343,7 +343,7 @@ def build_parser():
     ap.add_argument("--channels", type=int, default=2, help="channels in the AES67 stream")
     ap.add_argument("--pd-us", type=int, default=20000,
                     help="presentation delay announced by the bridge (firmware default: Live 20000, HQ 40000)")
-    ap.add_argument("--fifo-frames", type=int, default=840, help="AURACAST_FIFO_TARGET_FRAMES of the firmware")
+    ap.add_argument("--fifo-frames", type=int, default=840, help="FIFO_TARGET register of the firmware (frames)")
     ap.add_argument("--transport-latency-us", type=int, help="BIG transport latency if not in the capture")
     ap.add_argument("--out", help="directory for the capture file")
     return ap
