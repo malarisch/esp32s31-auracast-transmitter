@@ -1,13 +1,13 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
- * Encoder task: produces one SDU set (one LC3 frame per BIS: left/right in HQ mode, mono in
- * Live mode) whenever the controller has room in its queue, paced by the BIS "sent" callbacks
+ * Encoder task: produces one SDU set (one LC3 frame per BIS: left/right for stereo, one channel or
+ * the (L+R)/2 downmix for mono) whenever the controller has room in its queue, paced by the BIS "sent" callbacks
  * (Bluetooth clock domain).
  *
  * I2S source: 48 kHz frames arrive in the FPGA's (PTP) clock domain through the SPSC ring.
  * A PI controller steers the resampler ratio from the ring fill level, so exactly one LC3
- * frame per channel (480 frames at 48 kHz, 240 at 24 kHz) leaves per 10 ms of Bluetooth time.
+ * frame per channel (480/240/160 frames at 48/24/16 kHz) leaves per 10 ms of Bluetooth time.
  *
  *   NO_SIGNAL --signal--> PRIME --fill >= set point--> RUN
  *   RUN --signal lost--> NO_SIGNAL, RUN --underrun/overflow--> PRIME,
@@ -25,6 +25,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#include "auracast_i2c_regs.h"
 #include "broadcast.h"
 #include "pipeline.h"
 
@@ -52,6 +53,13 @@ static void *s_enc[2];
 static uint16_t s_sdu_len;
 static uint8_t s_nch;           /* BIS = encoder channels */
 static uint32_t s_out_frames;   /* LC3 frame length at the BIS sample rate */
+static uint8_t s_channels;      /* AURA_CH_*: how the stereo input maps to the BIS */
+static uint16_t s_fifo_target;  /* input FIFO set point, frames @ 48 kHz */
+
+/* I2S slot bit mask: one reader in i2s_in, two consumers here (log and status) */
+static portMUX_TYPE s_bits_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_bits_acc[2];
+enum { BITS_LOG, BITS_STATUS };
 
 static uint32_t s_frames_made;
 
@@ -120,7 +128,7 @@ static void silence(void)
 
 #if CONFIG_AURACAST_SOURCE_SYNTH
 /*
- * 25 ms hold exactly 11 periods of 440 Hz and 22 of 880 Hz (1200 frames at 48 kHz, 600 at 24 kHz);
+ * 25 ms hold exactly 11 periods of 440 Hz and 22 of 880 Hz (1200/600/400 frames at 48/24/16 kHz);
  * computed once (double is soft-float here)
  */
 #define SYNTH_TABLE_FRAMES 1200
@@ -164,7 +172,7 @@ static void source_log_fields(const window_stats_t *w, double *fill, double *ppm
 #else /* CONFIG_AURACAST_SOURCE_I2S */
 
 #define RING_FRAMES     4096
-#define IN_MAX_FRAMES   (FRAMES + FRAMES / 50 + 2 * RESAMPLER_TAPS + 8)   /* decimating filter: 2 x taps */
+#define IN_MAX_FRAMES   (FRAMES + FRAMES / 50 + 3 * RESAMPLER_TAPS + 8)   /* decimating filter: up to 3 x taps */
 #define RATE_ERROR_HOLD_US 5000000
 #define LEARNED_MIN_RUN_US 20000000   /* trust the learned clock offset after 20 s in RUN */
 #define STALE_ISR_US       (2 * I2S_IN_DMA_FRAMES * 1000000 / 48000)  /* two DMA blocks overdue */
@@ -196,6 +204,8 @@ static double s_learned_ratio = 1.0;
 static bool s_have_learned;
 static rate_check_t s_rc;
 static volatile float s_in_ppm;   /* measured input rate since the signal (re)appeared */
+static volatile float s_ppm_now;  /* drift controller correction of the last RUN step */
+static volatile uint32_t s_fill_now;
 
 #if CONFIG_AURACAST_TEST_TONE
 /* End-to-end check without a receiver: tone frequency per channel after resampling */
@@ -232,7 +242,7 @@ static void tone_ctl_task(void *arg)
 static void source_init(void)
 {
     spsc_ring_init(&s_ring, s_ring_buf, RING_FRAMES, 2);
-    s_rs = resampler_create_decim(s_nch, s_out_frames, (uint8_t)(48000 / broadcast_sample_rate()));
+    s_rs = resampler_create_decim(s_nch, s_out_frames, (uint8_t)(48000 / broadcast_sample_rate()));   /* 1, 2, 3 */
     ESP_ERROR_CHECK(s_rs ? ESP_OK : ESP_ERR_NO_MEM);
     const i2s_in_cfg_t cfg = {
         .bclk_gpio = CONFIG_AURACAST_I2S_BCLK_GPIO,
@@ -247,16 +257,26 @@ static void source_init(void)
 #endif
 }
 
-/* Resampler input for frames read into s_in: stereo as is, or the (L+R)/2 downmix for one BIS */
+/* Resampler input for frames read into s_in: stereo as is, or one channel / the (L+R)/2 downmix for one BIS */
 static const int32_t *mix_input(uint32_t frames)
 {
-    if (s_nch == 2) {
+    switch (s_channels) {
+    case AURA_CH_STEREO:
         return s_in;
+    case AURA_CH_MONO_LEFT:
+    case AURA_CH_MONO_RIGHT: {
+        const uint32_t off = s_channels == AURA_CH_MONO_RIGHT;
+        for (uint32_t i = 0; i < frames; i++) {
+            s_mono[i] = s_in[2 * i + off];
+        }
+        return s_mono;
     }
-    for (uint32_t i = 0; i < frames; i++) {
-        s_mono[i] = (s_in[2 * i] >> 1) + (s_in[2 * i + 1] >> 1);
+    default:
+        for (uint32_t i = 0; i < frames; i++) {
+            s_mono[i] = (s_in[2 * i] >> 1) + (s_in[2 * i + 1] >> 1);
+        }
+        return s_mono;
     }
-    return s_mono;
 }
 
 /* Read and discard n frames (consumer side) */
@@ -274,7 +294,7 @@ static void ring_discard(uint32_t n)
 
 static void enter_run(int64_t now)
 {
-    const drift_ctrl_cfg_t dc_cfg = DRIFT_CTRL_CFG_DEFAULT(CONFIG_AURACAST_FIFO_TARGET_FRAMES);
+    const drift_ctrl_cfg_t dc_cfg = DRIFT_CTRL_CFG_DEFAULT(s_fifo_target);
     drift_ctrl_init(&s_dc, &dc_cfg);
     if (s_have_learned) {
         /* Warm start after a gap: the clock offset is a property of the hardware */
@@ -293,7 +313,7 @@ static void enter_run(int64_t now)
     i2s_in_snapshot_t snap;
     i2s_in_snapshot(&snap);
     double est = fill_estimate(snap.ring_count, snap.t_last_isr_us, now, 48000.0, I2S_IN_DMA_FRAMES);
-    double excess = floor(est - CONFIG_AURACAST_FIFO_TARGET_FRAMES);
+    double excess = floor(est - s_fifo_target);
     if (excess > 0) {
         ring_discard((uint32_t)excess);
     }
@@ -327,6 +347,8 @@ static bool run_step(int64_t now, const i2s_in_snapshot_t *snap)
     }
     resampler_set_ratio(s_rs, drift_ctrl_ratio(&s_dc));
     double ppm = drift_ctrl_ppm(&s_dc);
+    s_ppm_now = (float)ppm;
+    s_fill_now = (uint32_t)(est > 0.0 ? est : 0.0);
     portENTER_CRITICAL(&s_win_lock);
     s_win.ppm_sum += ppm;
     s_win.fill_sum += est;
@@ -410,7 +432,7 @@ static void source_fill(void)
     case PIPE_PRIME:
         if (!snap.signal_present) {
             set_state(PIPE_NO_SIGNAL);
-        } else if (rate == RATE_OK && snap.ring_count >= CONFIG_AURACAST_FIFO_TARGET_FRAMES) {
+        } else if (rate == RATE_OK && snap.ring_count >= s_fifo_target) {
             enter_run(now);
             /* Consume in this tick already, otherwise the loop starts 480 frames above the set point */
             i2s_in_snapshot(&snap);
@@ -463,6 +485,43 @@ static void source_log_fields(const window_stats_t *w, double *fill, double *ppm
 }
 #endif /* CONFIG_AURACAST_SOURCE_I2S */
 
+static uint32_t bits_take(int who)
+{
+    uint32_t b = 0;
+#if CONFIG_AURACAST_SOURCE_I2S
+    b = i2s_in_take_bit_mask();
+#endif
+    portENTER_CRITICAL(&s_bits_lock);
+    s_bits_acc[BITS_LOG] |= b;
+    s_bits_acc[BITS_STATUS] |= b;
+    uint32_t r = s_bits_acc[who];
+    s_bits_acc[who] = 0;
+    portEXIT_CRITICAL(&s_bits_lock);
+    return r;
+}
+
+void pipeline_get_status(pipeline_status_t *out)
+{
+    memset(out, 0, sizeof(*out));
+#if CONFIG_AURACAST_SOURCE_I2S
+    _Static_assert(PIPE_NO_SIGNAL == AURA_PIPE_NO_SIGNAL && PIPE_PRIME == AURA_PIPE_PRIME && PIPE_RUN == AURA_PIPE_RUN &&
+                   PIPE_RATE_ERROR == AURA_PIPE_RATE_ERROR, "pipe states match the protocol");
+    i2s_in_snapshot_t snap;
+    i2s_in_snapshot(&snap);
+    out->state = (uint8_t)s_st;
+    out->signal = snap.signal_present;
+    out->fifo_fill = s_st == PIPE_RUN ? s_fill_now : snap.ring_count;
+    out->drift_ppm = s_ppm_now;
+    out->in_ppm = s_in_ppm;
+    out->underrun = s_underrun_v;
+    out->overflow = s_ovf_v;
+    out->lost = s_lost_v;
+#else
+    out->state = AURA_PIPE_RUN;
+#endif
+    out->i2s_bits = bits_take(BITS_STATUS);
+}
+
 static void produce_frame(void)
 {
     int64_t t0 = esp_timer_get_time();
@@ -511,7 +570,7 @@ static void stats_task(void *arg)
                  (unsigned long)w.proc_us_max, (unsigned long)st.sent, (unsigned long)esp_get_free_heap_size(),
                  st.bt_ppm);
 #if CONFIG_AURACAST_SOURCE_I2S
-        ESP_LOGI(TAG, "i2s bits=0x%08lx", (unsigned long)i2s_in_take_bit_mask());
+        ESP_LOGI(TAG, "i2s bits=0x%08lx", (unsigned long)bits_take(BITS_LOG));
 #endif
     }
 }
@@ -541,8 +600,10 @@ static void encoder_task(void *arg)
     }
 }
 
-esp_err_t pipeline_start(void)
+esp_err_t pipeline_start(const ctrl_config_t *cfg)
 {
+    s_channels = cfg->channels;
+    s_fifo_target = cfg->fifo_target;
     if (xTaskCreatePinnedToCore(encoder_task, "encoder", 6144, NULL, 15, NULL, 1) != pdPASS ||
         xTaskCreatePinnedToCore(stats_task, "stats", 4096, NULL, 2, NULL, 0) != pdPASS) {
         return ESP_ERR_NO_MEM;

@@ -38,7 +38,7 @@ static esp_ble_gap_ext_adv_params_t ext_adv_params = {
     .sid = ADV_SID,
     .scan_req_notif = false,
     .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
-    .tx_power = CONFIG_AURACAST_TX_POWER_DBM,
+    .tx_power = 0,                /* set in adv_start() */
 };
 
 static esp_ble_gap_periodic_adv_params_t periodic_adv_params = {
@@ -99,8 +99,10 @@ int adv_host_init(void)
     return 0;
 }
 
-int adv_start(const uint8_t *ext_data, uint8_t ext_len, const uint8_t *per_data, uint8_t per_len)
+int adv_start(const uint8_t *ext_data, uint8_t ext_len, const uint8_t *per_data, uint8_t per_len,
+              int8_t tx_power_dbm)
 {
+    ext_adv_params.tx_power = tx_power_dbm;
     WAIT_API(esp_ble_gap_ext_adv_set_params(ADV_HANDLE, &ext_adv_params));
     WAIT_API(esp_ble_gap_config_ext_adv_data_raw(ADV_HANDLE, ext_len, ext_data));
     WAIT_API(esp_ble_gap_periodic_adv_set_params(ADV_HANDLE, &periodic_adv_params));

@@ -14,4 +14,5 @@
 int adv_host_init(void);
 
 /* Non-connectable extended advertising (ext_data) plus periodic advertising (per_data, the BASE) */
-int adv_start(const uint8_t *ext_data, uint8_t ext_len, const uint8_t *per_data, uint8_t per_len);
+int adv_start(const uint8_t *ext_data, uint8_t ext_len, const uint8_t *per_data, uint8_t per_len,
+              int8_t tx_power_dbm);
