@@ -10,6 +10,7 @@ PHAT_BETA = 0.5          # partial whitening: sharp peak for music, a pure tone 
 MAX_LAG_S = 0.5
 MIN_LAG_S = -0.05
 AMBIGUOUS_RATIO = 1.5
+SILENT_RMS = 1e-3        # -60 dBFS
 
 
 class Alignment(NamedTuple):
@@ -84,6 +85,8 @@ def align(ref, ref_t0, ref_fs, rx, rx_t0, rx_fs) -> Alignment:
     lo, hi = int(np.floor(MIN_LAG_S * rx_fs)), int(np.ceil(MAX_LAG_S * rx_fs))
     j = np.arange(-hi, n - lo, dtype=np.float64)
     g = _to_rx_grid(ref, ref_t0, ref_fs, rx_t0, rx_fs, j)    # g[i] is ref at rx index i - hi
+    if np.sqrt(np.mean(rx ** 2)) < SILENT_RMS or np.sqrt(np.mean(g ** 2)) < SILENT_RMS:
+        return Alignment(float("nan"), 0.0, 0.0)   # nothing to correlate: never a confident number
     nfft = 1 << int(np.ceil(np.log2(len(g) + n)))
     G = np.fft.rfft(g, nfft)
     R = np.fft.rfft(rx, nfft)

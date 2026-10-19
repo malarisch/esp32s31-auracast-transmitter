@@ -195,7 +195,10 @@ Voraussetzungen: `dumpcap` mit Capabilities (Gruppe `wireshark`), `liblc3.so.1`,
 Established* (Transportlatenz) darin landet; dabei läuft das Audio über die Standard-Lautsprecher. Das Tool meldet je
 BIS außerdem, welchen AES67-Kanal es trägt, verlorene SDUs/Pakete und gestörte 10-ms-Blöcke. Gestört heißt: ein
 1-ms-Abschnitt mit SNR < 1 dB, der mindestens 6 dB mehr Fehler hat als liblc3 auf derselben Referenz; Stellen, die
-für LC3 bei dieser Bitrate einfach schwer sind, zählen so nicht.
+für LC3 bei dieser Bitrate einfach schwer sind, zählen so nicht, ebenso wenig vom PC verdeckte Verluste. Die Latenz
+wird in 2–6 Fenstern bestimmt (Median, Warnung bei > 0,5 ms Spanne). Stille oder rein periodischer Inhalt ergibt
+„mehrdeutig“ statt einer Zahl, ein stummer BIS wird gemeldet, ein Neustart von Board oder AES67-Sender ebenso (dann
+zählt das längste Segment). Defaults `--pd-us 20000 --fifo-frames 840` entsprechen der Firmware im Live-Modus.
 
 `tools/sine_check.py aufnahme.wav` prüft eine Aufnahme mit 440-Hz-Sinus blockweise (für Tests mit Sinus statt
 Musik).

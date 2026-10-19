@@ -51,13 +51,13 @@ def monitor(opcode, hci):
     return struct.pack(">HH", 0, opcode) + hci
 
 
-def iso_rx(handle, seq, sdu, ts_us=None):
+def iso_rx(handle, seq, sdu, ts_us=None, status=0):
     hdr = b""
     flags = 0x2 << 12   # PB = complete SDU
     if ts_us is not None:
         flags |= 1 << 14
         hdr += struct.pack("<I", ts_us)
-    hdr += struct.pack("<HH", seq, len(sdu))
+    hdr += struct.pack("<HH", seq, len(sdu) | (status << 14))
     body = hdr + sdu
     return monitor(19, struct.pack("<HH", handle | flags, len(body)) + body)
 
@@ -108,6 +108,11 @@ class CaptureTest(unittest.TestCase):
         self.assertEqual((s[0].handle, s[0].seq, s[0].ts_us, len(s[0].sdu)), (0x10, 7, 123456, 60))
         self.assertAlmostEqual(s[0].t, 2.0, delta=1e-6)
 
+    def test_hci_iso_rx_status(self):
+        p = self.pcap([254], [(0, 2.0, iso_rx(0x0010, 8, b"", status=2))])
+        s = capture.hci_iso_rx(capture.read_pcapng(p))
+        self.assertEqual((s[0].seq, s[0].status, s[0].sdu), (8, 2, b""))
+
     def test_big_sync_established(self):
         params = bytes([0x1D, 0x00, 0x00]) + (10000).to_bytes(3, "little") + bytes([4, 1, 0, 2]) \
             + struct.pack("<HHB", 60, 8, 1) + struct.pack("<H", 0x0010)
@@ -117,6 +122,11 @@ class CaptureTest(unittest.TestCase):
         self.assertEqual(len(b), 1)
         self.assertEqual((b[0].big_handle, b[0].transport_latency_us, b[0].nse, b[0].bn, b[0].pto, b[0].irc,
                           b[0].iso_interval_us, b[0].bis_handles), (0, 10000, 4, 1, 0, 2, 10000, [0x10]))
+
+    def test_segments(self):
+        sdus = [capture.IsoSdu(i * 0.01, 0x10, i, None, b"") for i in range(100)]
+        sdus += [capture.IsoSdu(2.0 + i * 0.01, 0x10, i, None, b"") for i in range(300)]
+        self.assertEqual([len(g) for g in capture.segments(sdus, 0x10)], [100, 300])
 
     def test_longest_segment(self):
         sdus = [capture.IsoSdu(i * 0.01, 0x10, i, None, b"") for i in range(100)]

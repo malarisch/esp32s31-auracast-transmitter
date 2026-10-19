@@ -41,6 +41,7 @@ class IsoSdu(NamedTuple):
     seq: int
     ts_us: Optional[int]
     sdu: bytes
+    status: int = 0   # Packet_Status_Flag: 0 valid, 1 possibly invalid, 2 lost (no data)
 
 
 class BigSync(NamedTuple):
@@ -166,16 +167,16 @@ def hci_iso_rx(packets) -> list:
                 ts_us = struct.unpack_from("<I", body, 0)[0]
                 off = 4
             seq, slen = struct.unpack_from("<HH", body, off)
-            frag = (t, handle, seq, ts_us, slen & 0x0FFF, bytearray(body[off + 4:]))
+            frag = (t, handle, seq, ts_us, slen >> 14, bytearray(body[off + 4:]))
             if pb == 2:
-                out.append(IsoSdu(t, handle, seq, ts_us, bytes(frag[5])))
+                out.append(IsoSdu(t, handle, seq, ts_us, bytes(frag[5]), frag[4]))
             else:
                 partial[handle] = frag
         elif handle in partial:
             partial[handle][5].extend(body)
             if pb == 3:
                 f = partial.pop(handle)
-                out.append(IsoSdu(t, handle, f[2], f[3], bytes(f[5])))
+                out.append(IsoSdu(t, handle, f[2], f[3], bytes(f[5]), f[4]))
     return out
 
 
@@ -196,13 +197,19 @@ def big_sync_established(packets) -> list:
     return out
 
 
-def longest_segment(sdus, handle: int, max_gap: int = 50) -> list:
-    """Longest run of SDUs on `handle` whose sequence numbers increase by 1..max_gap (mod 2^16)."""
-    best, cur = [], []
+def segments(sdus, handle: int, max_gap: int = 50) -> list:
+    """Runs of SDUs on `handle` whose sequence numbers increase by 1..max_gap (mod 2^16); a new run
+    starts where the stream restarted (BIG re-created, board reset)."""
+    out, cur = [], []
     for s in (x for x in sdus if x.handle == handle):
         if cur and not (1 <= (s.seq - cur[-1].seq) % 65536 <= max_gap):
-            if len(cur) > len(best):
-                best = cur
+            out.append(cur)
             cur = []
         cur.append(s)
-    return cur if len(cur) > len(best) else best
+    if cur:
+        out.append(cur)
+    return out
+
+
+def longest_segment(sdus, handle: int, max_gap: int = 50) -> list:
+    return max(segments(sdus, handle, max_gap), key=len, default=[])
