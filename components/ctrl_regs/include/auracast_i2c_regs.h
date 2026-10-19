@@ -9,6 +9,8 @@
  *   Read:  [reg], repeated start, read N bytes    e.g. i2c_write_read()
  * The S31 stretches SCL at the start of a read until the data is ready (typically well below 1 ms):
  * the master must allow clock stretching. Reading an address without a register returns 0x00.
+ * A read returns at most AURA_READ_MAX bytes (longer fields, e.g. NAME or the status block, take two
+ * reads) and must always be preceded by a register address write (write_read).
  *
  * Life cycle:
  *   boot -> WAIT_CONFIG: nothing is broadcast; the master writes the configuration registers
@@ -26,6 +28,7 @@
 
 #define AURA_I2C_DEFAULT_ADDR      0x3A
 #define AURA_PROTO_VERSION         1
+#define AURA_READ_MAX              31      /* bytes per read transaction (one hardware FIFO fill) */
 
 /* ---- Identification and control ---------------------------------------- */
 #define AURA_REG_MAGIC             0x00    /* R  4  'A','U','R','A' */
@@ -40,7 +43,7 @@
 /* ---- Configuration (writable in WAIT_CONFIG and CONFIG_ERROR) ---------- */
 #define AURA_REG_PRESET            0x10    /* RW 1  AURA_PRESET_* */
 #define AURA_REG_CHANNELS          0x11    /* RW 1  AURA_CH_* */
-#define AURA_REG_CONTEXT           0x12    /* RW 2  streaming context bit mask, != 0 (Live 0x0040, Media 0x0004) */
+#define AURA_REG_CONTEXT           0x12    /* RW 2  streaming context bit mask, != 0, within AURA_CONTEXT_MASK (Live 0x0040, Media 0x0004) */
 #define AURA_REG_FLAGS             0x14    /* RW 1  AURA_FLAG_*, other bits must be 0 */
 #define AURA_REG_TX_POWER          0x15    /* RW 1  int8 dBm, AURA_TX_POWER_MIN..MAX */
 #define AURA_REG_PD_US             0x16    /* RW 2  presentation delay in us, AURA_PD_US_MIN..MAX */
@@ -48,6 +51,7 @@
 #define AURA_REG_BROADCAST_ID      0x1A    /* RW 4  AURA_BROADCAST_ID_RANDOM or 0..0xFFFFFF */
 #define AURA_REG_NAME              0x20    /* RW 32 Broadcast_Name, UTF-8, 4..32 bytes up to the first 0x00 */
 #define AURA_REG_CODE              0x40    /* RW 16 Broadcast_Code, 0..16 bytes up to the first 0x00; empty = unencrypted */
+/* NAME and CODE: always write the whole field, padded with 0x00, or the tail of the old value remains */
 
 #define AURA_NAME_SIZE             32
 #define AURA_CODE_SIZE             16
@@ -78,6 +82,7 @@
 #define AURA_STATE_CONFIG_ERROR    3
 #define AURA_STATE_FAULT           4
 
+/* ERROR/ERROR_REG hold the last rejection; an accepted START clears them */
 #define AURA_ERR_NONE              0
 #define AURA_ERR_READ_ONLY         1       /* write to a read-only or reserved address */
 #define AURA_ERR_LOCKED            2       /* configuration write or START after START */
@@ -100,6 +105,8 @@
 #define AURA_CH_COUNT              4
 
 #define AURA_FLAG_IMMEDIATE        0x01    /* announce Broadcast_Audio_Immediate_Rendering_Flag */
+
+#define AURA_CONTEXT_MASK          0x0FFF  /* defined context type bits; the others are reserved */
 
 #define AURA_TX_POWER_MIN          (-15)
 #define AURA_TX_POWER_MAX          20

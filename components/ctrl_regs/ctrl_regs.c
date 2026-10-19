@@ -149,7 +149,7 @@ uint8_t ctrl_regs_get_config(const ctrl_regs_t *r, ctrl_config_t *out, uint8_t *
         bad = AURA_REG_PRESET;
     } else if (out->channels >= AURA_CH_COUNT) {
         bad = AURA_REG_CHANNELS;
-    } else if (out->context == 0) {
+    } else if (out->context == 0 || (out->context & ~AURA_CONTEXT_MASK)) {
         bad = AURA_REG_CONTEXT;
     } else if (m[AURA_REG_FLAGS] & ~AURA_FLAG_IMMEDIATE) {
         bad = AURA_REG_FLAGS;

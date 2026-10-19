@@ -230,6 +230,7 @@ static void expect_bad(void (*mutate)(ctrl_regs_t *), uint8_t reg, const char *w
 static void m_preset(ctrl_regs_t *r) { wr8(r, AURA_REG_PRESET, AURA_PRESET_COUNT); }
 static void m_channels(ctrl_regs_t *r) { wr8(r, AURA_REG_CHANNELS, AURA_CH_COUNT); }
 static void m_context(ctrl_regs_t *r) { wr16(r, AURA_REG_CONTEXT, 0); }
+static void m_context_rfu(ctrl_regs_t *r) { wr16(r, AURA_REG_CONTEXT, 0x1040); }
 static void m_flags(ctrl_regs_t *r) { wr8(r, AURA_REG_FLAGS, 0x02); }
 static void m_tx_low(ctrl_regs_t *r) { wr8(r, AURA_REG_TX_POWER, (uint8_t)(int8_t)(AURA_TX_POWER_MIN - 1)); }
 static void m_tx_high(ctrl_regs_t *r) { wr8(r, AURA_REG_TX_POWER, AURA_TX_POWER_MAX + 1); }
@@ -245,6 +246,7 @@ static void test_validation(void)
     expect_bad(m_preset, AURA_REG_PRESET, "preset");
     expect_bad(m_channels, AURA_REG_CHANNELS, "channels");
     expect_bad(m_context, AURA_REG_CONTEXT, "context");
+    expect_bad(m_context_rfu, AURA_REG_CONTEXT, "context reserved bits");
     expect_bad(m_flags, AURA_REG_FLAGS, "flags");
     expect_bad(m_tx_low, AURA_REG_TX_POWER, "tx low");
     expect_bad(m_tx_high, AURA_REG_TX_POWER, "tx high");

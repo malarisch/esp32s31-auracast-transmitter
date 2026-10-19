@@ -84,9 +84,13 @@ hängt nur von `<stdint.h>` ab und kann so in die Zephyr-Firmware übernommen we
 - Schreiben: `[reg][daten…]` (Zephyr: `i2c_burst_write`). Lesen: `[reg]`, Repeated Start, N Byte
   (`i2c_write_read`). **Vor jedem Lesen den Registerzeiger setzen**: Ein Lesen ohne vorangehendes Schreiben liefert
   Reste des letzten Lesezugriffs.
+- **Höchstens 31 Byte pro Lesezugriff** (eine Füllung der Hardware-FIFO). NAME (32 Byte) und den Statusblock
+  (44 Byte) in zwei Zugriffen lesen. Mehr gelesene Bytes sind ungültig.
+- NAME und CODE immer **ganz** schreiben, mit 0x00 aufgefüllt; sonst bleibt der Rest des alten Werts stehen.
 - Beim Lesen hält der S31 SCL fest, bis die Antwort bereitsteht (typisch deutlich unter 1 ms). Der Master muss
   **Clock Stretching** zulassen.
-- Abgelehnte Schreibzugriffe werden trotzdem geACKt; sie setzen `ERROR` und `ERROR_REG`.
+- Abgelehnte Schreibzugriffe werden trotzdem geACKt; sie setzen `ERROR` und `ERROR_REG`. Die beiden zeigen die
+  letzte Ablehnung; erst ein angenommenes START löscht sie.
 
 Ablauf:
 
@@ -97,7 +101,8 @@ Ablauf:
    `ERROR` = BAD_VALUE (3) und `ERROR_REG` zeigt auf das Feld; korrigieren und START erneut. Sonst STARTING (1), nach
    etwa 0,5 s STREAMING (2). FAULT (4) heißt: Der Bluetooth-Stack hat abgelehnt, nur RESET hilft.
 4. Ab STARTING sind die Konfigurationsregister gesperrt (`ERROR` = LOCKED). Ändern: `COMMAND` = 0xA5 (RESET). Der
-   S31 startet etwa 10 ms später neu und wartet wieder. Die Konfiguration liegt nur im RAM: Nach jedem Neustart, auch
+   S31 startet etwa 10 ms später neu und antwortet nach rund 0,6 s wieder auf seine Adresse (der I2C-Slave startet
+   nach der Bluetooth-Initialisierung; im Log bei 553 ms nach dem App-Start). Die Konfiguration liegt nur im RAM: Nach jedem Neustart, auch
    durch Watchdog oder Brownout, wartet der S31 wieder (`RESET_REASON` 0x0B sagt, warum er neu gestartet ist).
 
 | Adr. | Register | Bytes | Inhalt (Wert nach dem Boot) |
@@ -108,7 +113,7 @@ Ablauf:
 | 0x0C | COMMAND | 1 | 0x5A START, 0xA5 RESET |
 | 0x10 | PRESET | 1 | 0 = 16_2_1, **1 = 24_2_1**, 2 = 48_2_1, 3 = 48_4_1, 4 = 48_6_1 |
 | 0x11 | CHANNELS | 1 | **0 = Mono (L+R)/2**, 1 = Stereo (2 BIS), 2 = Mono L, 3 = Mono R |
-| 0x12 | CONTEXT | 2 | Streaming-Context-Bitmaske (**0x0040 Live**, 0x0004 Media) |
+| 0x12 | CONTEXT | 2 | Streaming-Context-Bitmaske, nur Bits 0x0FFF (**0x0040 Live**, 0x0004 Media) |
 | 0x14 | FLAGS | 1 | Bit 0 Immediate Rendering (**1**) |
 | 0x15 | TX_POWER | 1 | int8 dBm, −15…20 (**9**) |
 | 0x16 | PD_US | 2 | Presentation Delay 20000…40000 µs (**20000**) |

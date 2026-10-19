@@ -4,14 +4,21 @@
  * I2C slave front end of the control interface. The driver callbacks run in the ISR and only queue
  * events; the control task applies them to the register file:
  *   receive (master write, also the register address of a write_read) -> drop leftover TX data, ctrl_regs_write()
- *   request (master read; SCL is stretched until i2c_slave_write())   -> up to READ_CHUNK bytes from the pointer
+ *   request (master read; SCL is stretched until i2c_slave_write())   -> AURA_READ_MAX bytes from the pointer
  * A master read that stops early leaves bytes in the TX FIFO; they are dropped at the next write, so every
  * read must set the register pointer first (write_read), as the protocol requires.
+ *
+ * Why at most AURA_READ_MAX (31) bytes per read: i2c_slave_write() puts fewer bytes than the free hardware FIFO
+ * (32) straight into the FIFO, more go through the driver's ring buffer. Leftovers in the FIFO alone can be
+ * dropped with a plain TX FIFO reset. i2c_slave_reset_tx_fifo() would also drain the ring buffer, but it resets
+ * the SCL state machine as well, and the receive event of a write_read arrives while the slave stretches SCL
+ * for the read: the IDF documents that reset for after a completed read only.
  */
 #include <string.h>
 
 #include "driver/i2c_slave.h"
 #include "esp_attr.h"
+#include "hal/i2c_ll.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -26,7 +33,7 @@
 #include "pipeline.h"
 
 #define RX_MAX           96      /* largest master write we keep: register + 64 config bytes + margin */
-#define READ_CHUNK       64      /* bytes queued per read request (longest field: NAME, status block 44) */
+#define I2C_PORT         I2C_NUM_0
 #define EVT_QUEUE_LEN    8
 #define STATUS_PERIOD_MS 500
 #define RESET_DELAY_MS   10
@@ -49,6 +56,17 @@ static SemaphoreHandle_t s_started;       /* given once on an accepted START */
 static ctrl_regs_t s_regs;
 static ctrl_config_t s_cfg;
 static uint32_t s_rx_dropped;
+static portMUX_TYPE s_fifo_lock = portMUX_INITIALIZER_UNLOCKED;
+
+_Static_assert(AURA_READ_MAX < I2C_LL_FIFO_LEN, "a read must fit the hardware TX FIFO");
+
+/* Drops bytes a shorter master read left in the TX FIFO (the ring buffer stays empty, see above) */
+static void drop_tx_leftovers(void)
+{
+    portENTER_CRITICAL(&s_fifo_lock);   /* keeps the driver ISR (same core) out */
+    i2c_ll_txfifo_rst(I2C_LL_GET_HW(I2C_PORT));
+    portEXIT_CRITICAL(&s_fifo_lock);
+}
 
 static IRAM_ATTR bool on_receive(i2c_slave_dev_handle_t dev, const i2c_slave_rx_done_event_data_t *e, void *arg)
 {
@@ -90,7 +108,7 @@ static void handle_start(void)
 static void handle_rx(const ctrl_evt_t *evt)
 {
     /* A new transaction: bytes left from a shorter read must not reach the next one */
-    i2c_slave_reset_tx_fifo(s_dev);
+    drop_tx_leftovers();
     xSemaphoreTake(s_lock, portMAX_DELAY);
     ctrl_cmd_t cmd = ctrl_regs_write(&s_regs, evt->data, evt->len);
     if (cmd == CTRL_CMD_START) {
@@ -106,7 +124,7 @@ static void handle_rx(const ctrl_evt_t *evt)
 
 static void handle_request(void)
 {
-    uint8_t buf[READ_CHUNK];
+    uint8_t buf[AURA_READ_MAX];
     xSemaphoreTake(s_lock, portMAX_DELAY);
     ctrl_regs_read(&s_regs, buf, sizeof(buf));
     /* The master reads fewer bytes in general: the pointer follows what was queued, not what was clocked out */
@@ -188,7 +206,7 @@ esp_err_t ctrl_i2c_start(void)
     }
 
     const i2c_slave_config_t cfg = {
-        .i2c_port = -1,
+        .i2c_port = I2C_PORT,
         .sda_io_num = CONFIG_AURACAST_I2C_SDA_GPIO,
         .scl_io_num = CONFIG_AURACAST_I2C_SCL_GPIO,
         .clk_source = I2C_CLK_SRC_DEFAULT,
