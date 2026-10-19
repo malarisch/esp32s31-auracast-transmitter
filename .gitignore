@@ -1,6 +1,4 @@
 docs/**
-!docs/superpowers/
-!docs/superpowers/**
 build/
 build_host/
 sdkconfig
