@@ -109,7 +109,20 @@ pipeline: state=RUN fill=960.0 ppm=+41.62 in_ppm=+41.74 underrun=0 ovf=0 lost=0 
 | 2026-10-17 | Falsche Rate (real +2081 ppm) | `RATE_ERROR` ~13 s nach `RUN`, zyklischer Wiederanlauf ohne Reset, `in_ppm` zeigt +2081 |
 | 2026-10-17 | Falsche Rate 44,1 kHz (nach Review-Fix) | `RATE_ERROR` 0,5 s nach Signalbeginn mit „44100 Hz“ im Log, kein Abspielen, keine Unterläufe, Wiederholversuch alle 5,5 s |
 | 2026-10-17 | Jeder 500. Bestätigungs-Callback verworfen, 60 s | durchgehend `RUN`, Füllstand 960, `wd` unverändert — Pacing heilt sich über Sequenznummern |
-| offen | Hörtest | Braucht einen Auracast-Empfänger (AirPods können kein Auracast) |
+| 2026-10-19 | Empfang am Linux-PC (BlueZ 5.87 + PipeWire 1.6.2, MediaTek MT7902), Synth-Quelle | Auracast-Ankündigung (0x1852 + ID, 0x1856 HQ, Name) korrekt; BlueZ synchronisiert PA/BASE/BIG und legt 2 Transports an; PipeWire decodiert LC3: links 440,0 Hz, rechts 880,0 Hz, je −15 dBFS RMS, > 72 dB Abstand, keine Aussetzer in 6 s |
+| offen | Hörtest mit Consumer-Empfänger | z. B. LE-Audio-Kopfhörer (AirPods können kein Auracast) |
+
+### Empfang am Linux-PC nachvollziehen
+
+Voraussetzungen: BlueZ mit `Experimental = true` und `KernelExperimental = 6fbaf188-05e0-496a-9885-d6ddfdb4e03e`
+in `/etc/bluetooth/main.conf`, Controller mit `sync-receiver` (`btmgmt info`), PipeWire mit LC3.
+
+```bash
+bluetoothctl                     # dann:
+scan le                          # findet "AES67 Auracast", legt sid0/bis1 und sid0/bis2 als Transports an
+transport.select /org/bluez/hci0/dev_<MAC>/sid0/bis1/fd0 /org/bluez/hci0/dev_<MAC>/sid0/bis2/fd1
+# PipeWire bietet danach je BIS eine Quelle bluez_input.<MAC>… an (pw-record --target …)
+```
 | offen | Betrieb am FPGA | Testton aus, FPGA an J2; `in_ppm`/`ppm` zeigen die reale Abweichung PTP ↔ Modul-Quarz |
 
 ## Latenz (geschätzt)
