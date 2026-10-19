@@ -195,7 +195,7 @@ dass es ein Bit zu spät ist. Bei einem Sender mit echten 32-Bit-Daten ist die M
 | 2026-10-19 | Live-Modus 24_2_1 mono, BlueZ | 1 Transport, 24 kHz/10 ms/60 B ohne Channel-Allocation, Location 0, PD 20000, Kontext Live (0x0040); PBA 0x1856 mit Feature SQ (0x02) und Metadaten `01 09` (Immediate Rendering); Rechenzeit max. 1,8 ms pro 10 ms (HQ: 4,9 ms) |
 | 2026-10-19 | Störungsfreiheit (Referenzvergleich mit `measure_latency.py`) | HQ und Live, 9 Aufzeichnungen à 20–60 s: 0 gestörte 10-ms-Blöcke, 0 verlorene SDUs |
 | 2026-10-19 | Kanalzuordnung am FPGA | BIS 1 (angekündigt links) trägt den **rechten** AES67-Kanal, BIS 2 den linken. Ursache offen (WS-Polarität FPGA ↔ ESP?) |
-| 2026-10-19 | I2C-Steuerung am FPGA, ohne I2C-Master | Ohne AUTOSTART: wartet, 30 s Scan findet keinen Broadcast. Mit AUTOSTART: Live 24_2_1 2 min `RUN`, alle Fehlerzähler 0, `i2s bits` …00, Heap 99 KB; 16_2_1 mono `RUN`, vom PC empfangen, Rechenzeit max. 1,8 ms, Heap 67 KB; 48_4_1 stereo `RUN`, 2 BIS, Heap 117 KB. Die I2C-Strecke selbst ist noch nicht getestet |
+| 2026-10-19 | I2C-Steuerung am FPGA, ohne I2C-Master | Ohne AUTOSTART: wartet, 30 s Scan findet keinen Broadcast. Mit AUTOSTART: Live 24_2_1 2 min `RUN`, alle Fehlerzähler 0, `i2s bits` …00, Heap 99 KB; 16_2_1 mono `RUN`, vom PC empfangen, Rechenzeit max. 1,8 ms, Heap 67 KB; 16_2_1 stereo `RUN`, 2 BIS, Rechenzeit max. 3,4 ms, Heap 57 KB; 48_4_1 stereo `RUN`, 2 BIS, Heap 117 KB. Die I2C-Strecke selbst ist noch nicht getestet |
 | offen | Hörtest mit Hörgerät / Consumer-Empfänger | z. B. LE-Audio-Kopfhörer (AirPods können kein Auracast) |
 
 ### Empfang am Linux-PC nachvollziehen
