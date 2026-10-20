@@ -94,7 +94,7 @@ static esp_err_t encoders_open(void)
 {
     for (int ch = 0; ch < s_nch; ch++) {
         esp_lc3_enc_config_t cfg = ESP_LC3_ENC_CONFIG_DEFAULT();
-        cfg.sample_rate = broadcast_sample_rate();
+        cfg.sample_rate = broadcast_bis_rate(0);
         cfg.bits_per_sample = 32;
         cfg.channel = 1;
         cfg.frame_dms = 100;
@@ -140,7 +140,7 @@ static uint32_t s_synth_len;
 static void source_init(void)
 {
     static const double freq[2] = {440.0, 880.0};
-    const uint32_t rate = broadcast_sample_rate();
+    const uint32_t rate = broadcast_bis_rate(0);
     s_synth_len = rate / 40;
     for (int ch = 0; ch < s_nch; ch++) {
         for (uint32_t i = 0; i < s_synth_len; i++) {
@@ -244,7 +244,7 @@ static void tone_ctl_task(void *arg)
 static void source_init(void)
 {
     spsc_ring_init(&s_ring, s_ring_buf, RING_FRAMES, 2);
-    s_rs = resampler_create_decim(s_nch, s_out_frames, (uint8_t)(48000 / broadcast_sample_rate()));   /* 1, 2, 3 */
+    s_rs = resampler_create_decim(s_nch, s_out_frames, (uint8_t)(48000 / broadcast_bis_rate(0)));   /* 1, 2, 3 */
     ESP_ERROR_CHECK(s_rs ? ESP_OK : ESP_ERR_NO_MEM);
     const i2s_in_cfg_t cfg = {
         .bclk_gpio = CONFIG_AURACAST_I2S_BCLK_GPIO,
@@ -480,7 +480,7 @@ static void source_log_fields(const window_stats_t *w, double *fill, double *ppm
     *lost = s_lost_v;
 #if CONFIG_AURACAST_TEST_TONE
     if (w->cross_frames) {
-        double secs = w->cross_frames / (double)broadcast_sample_rate();
+        double secs = w->cross_frames / (double)broadcast_bis_rate(0);
         ESP_LOGI(TAG, "tone check (after resampler): L=%.1fHz R=%.1fHz", w->cross[0] / secs, w->cross[1] / secs);
     }
 #endif
@@ -545,7 +545,8 @@ static void produce_frame(void)
     }
 #endif
     const uint8_t *const sdu[2] = {s_sdu[0], s_sdu[1]};
-    broadcast_send_frame(sdu, s_sdu_len);
+    const uint16_t len[2] = {s_sdu_len, s_sdu_len};
+    broadcast_send_frame(sdu, len);
     uint32_t proc = (uint32_t)(esp_timer_get_time() - t0);
     portENTER_CRITICAL(&s_win_lock);
     s_win.proc_us_max = proc > s_win.proc_us_max ? proc : s_win.proc_us_max;
@@ -582,9 +583,9 @@ static void stats_task(void *arg)
 
 static void encoder_task(void *arg)
 {
-    s_sdu_len = broadcast_sdu_len();
+    s_sdu_len = broadcast_bis_sdu_len(0);
     s_nch = broadcast_stream_count();
-    s_out_frames = broadcast_sample_rate() / 100;
+    s_out_frames = broadcast_bis_rate(0) / 100;
     if (s_sdu_len > MAX_SDU || encoders_open() != ESP_OK) {
         ESP_LOGE(TAG, "encoder setup failed (sdu %u)", s_sdu_len);
         vTaskDelete(NULL);

@@ -7,8 +7,11 @@
  * examples/bluetooth/esp_ble_audio/bap/broadcast_source/main/main.c.
  *
  * Auracast (BAP broadcast source + Public Broadcast Profile announcement), configured at runtime
- * (ctrl_config_t from the I2C control interface): one LC3 preset (16/24/48 kHz, 10 ms frames), and
- * one mono BIS or two BIS (front left / front right).
+ * (ctrl_config_t from the I2C control interface): one BIG with one or two subgroups, each with an LC3
+ * preset (16/24/48 kHz, 10 ms frames) and one mono BIS or two BIS (front left / front right).
+ * Subgroup 0 is Standard Quality (or the only one), subgroup 1 the optional 48 kHz High Quality one.
+ * All BIS of a BIG share one QoS (SDU interval, RTN, PHY, Max_SDU, transport latency, presentation
+ * delay): with two subgroups it is the maximum of both presets.
  * Pacing: keep BROADCAST_TX_DEPTH SDUs queued per BIS. The number
  * in flight is derived from sequence numbers (next to send vs. newest completed on BIS 0), so a
  * lost or late completion callback corrects itself at the next one.
@@ -39,12 +42,14 @@
 
 static const char *TAG = "broadcast";
 
-#define MAX_STREAMS 2
+#define MAX_STREAMS   BROADCAST_MAX_BIS
+#define MAX_SUBGROUPS 2
 _Static_assert(CONFIG_BT_BAP_BROADCAST_SRC_STREAM_COUNT >= MAX_STREAMS, "not enough broadcast streams");
+_Static_assert(CONFIG_BT_BAP_BROADCAST_SRC_SUBGROUP_COUNT >= MAX_SUBGROUPS, "not enough broadcast subgroups");
 
 /*
- * All selectable presets (10 ms frames). Location and context are placeholders: source_create() sets
- * the channel allocation and the streaming context of the chosen one.
+ * All selectable presets (10 ms frames). Location and context are placeholders: broadcast_configure()
+ * copies the chosen ones and source_create() sets the channel allocation and the streaming context on the copies.
  */
 ESP_BLE_AUDIO_BAP_LC3_BROADCAST_PRESET_16_2_1_DEFINE(s_p16_2_1, ESP_BLE_AUDIO_LOCATION_MONO_AUDIO,
                                                      ESP_BLE_AUDIO_CONTEXT_TYPE_MEDIA);
@@ -68,7 +73,10 @@ static const char *const s_preset_names[AURA_PRESET_COUNT] = {"16_2_1", "24_2_1"
 static const char *const s_channel_names[AURA_CH_COUNT] = {"mono (L+R)/2", "stereo", "mono L", "mono R"};
 
 static ctrl_config_t s_cfg;
-static esp_ble_audio_bap_lc3_preset_t *s_preset;
+static broadcast_subgroup_t s_sub[MAX_SUBGROUPS];
+static esp_ble_audio_bap_lc3_preset_t s_sub_preset[MAX_SUBGROUPS];   /* copies of s_presets[] */
+static esp_ble_audio_bap_qos_cfg_t s_qos;                             /* of the BIG */
+static uint8_t s_sub_count;
 static uint8_t s_stream_count;
 
 static struct {
@@ -225,9 +233,8 @@ static esp_err_t source_create(void)
         .started = source_started_cb,
         .stopped = source_stopped_cb,
     };
-    const bool stereo = s_stream_count == 2;
     esp_ble_audio_bap_broadcast_source_stream_param_t stream_params[MAX_STREAMS];
-    esp_ble_audio_bap_broadcast_source_subgroup_param_t subgroup = {0};
+    esp_ble_audio_bap_broadcast_source_subgroup_param_t subgroups[MAX_SUBGROUPS] = {0};
     esp_ble_audio_bap_broadcast_source_param_t create = {0};
 
     esp_err_t err = esp_ble_audio_bap_broadcast_source_register_cb(&source_cb);
@@ -236,35 +243,51 @@ static esp_err_t source_create(void)
         return err;
     }
 
-    for (int i = 0; i < s_stream_count; i++) {
-        stream_params[i].stream = &s_streams[i].stream;
-        stream_params[i].data = stereo ? (i == 0 ? chan_left : chan_right) : NULL;
-        stream_params[i].data_len = stereo ? (i == 0 ? sizeof(chan_left) : sizeof(chan_right)) : 0;
-        esp_ble_audio_bap_stream_cb_register(&s_streams[i].stream, &s_stream_ops);
+    for (int g = 0; g < s_sub_count; g++) {
+        const broadcast_subgroup_t *sg = &s_sub[g];
+        esp_ble_audio_codec_cfg_t *codec = &s_sub_preset[g].codec_cfg;
+        const bool stereo = sg->channels == AURA_CH_STEREO;
+        for (int b = 0; b < sg->bis_count; b++) {
+            const int i = sg->first_bis + b;
+            stream_params[i].stream = &s_streams[i].stream;
+            stream_params[i].data = stereo ? (b == 0 ? chan_left : chan_right) : NULL;
+            stream_params[i].data_len = stereo ? (b == 0 ? sizeof(chan_left) : sizeof(chan_right)) : 0;
+            esp_ble_audio_bap_stream_cb_register(&s_streams[i].stream, &s_stream_ops);
+        }
+        if (stereo) {
+            err = esp_ble_audio_codec_cfg_set_chan_allocation(codec, ESP_BLE_AUDIO_LOCATION_FRONT_LEFT |
+                                                              ESP_BLE_AUDIO_LOCATION_FRONT_RIGHT);
+        } else {
+            /* A mono stream must not carry an Audio_Channel_Allocation LTV (Auracast transmitter guide) */
+            err = esp_ble_audio_codec_cfg_unset_val(codec, ESP_BLE_AUDIO_CODEC_CFG_CHAN_ALLOC);
+        }
+        if (err) {
+            ESP_LOGW(TAG, "subgroup %d: setting the channel allocation failed, err %d", g, err);
+        }
+        const uint16_t context = g == 0 ? s_cfg.context : s_cfg.hq_context;
+        err = esp_ble_audio_codec_cfg_meta_set_stream_context(codec, (esp_ble_audio_context_t)context);
+        if (err) {
+            ESP_LOGE(TAG, "subgroup %d: setting the streaming context 0x%04x failed, err %d", g, context, err);
+            return err;
+        }
+        subgroups[g].params_count = sg->bis_count;
+        subgroups[g].params = &stream_params[sg->first_bis];
+        subgroups[g].codec_cfg = codec;
     }
-    if (stereo) {
-        err = esp_ble_audio_codec_cfg_set_chan_allocation(&s_preset->codec_cfg, ESP_BLE_AUDIO_LOCATION_FRONT_LEFT |
-                                                          ESP_BLE_AUDIO_LOCATION_FRONT_RIGHT);
-    } else {
-        /* A mono stream must not carry an Audio_Channel_Allocation LTV (Auracast transmitter guide) */
-        err = esp_ble_audio_codec_cfg_unset_val(&s_preset->codec_cfg, ESP_BLE_AUDIO_CODEC_CFG_CHAN_ALLOC);
-    }
-    if (err) {
-        ESP_LOGW(TAG, "setting the channel allocation failed, err %d", err);
-    }
-    err = esp_ble_audio_codec_cfg_meta_set_stream_context(&s_preset->codec_cfg, (esp_ble_audio_context_t)s_cfg.context);
-    if (err) {
-        ESP_LOGE(TAG, "setting the streaming context 0x%04x failed, err %d", s_cfg.context, err);
-        return err;
-    }
-    subgroup.params_count = s_stream_count;
-    subgroup.params = stream_params;
-    subgroup.codec_cfg = &s_preset->codec_cfg;
-    s_preset->qos.pd = s_cfg.pd_us;
 
-    create.params_count = 1;
-    create.params = &subgroup;
-    create.qos = &s_preset->qos;
+    /* One QoS per BIG: the maximum of the subgroup presets (RTN, SDU, transport latency) */
+    s_qos = s_sub_preset[0].qos;
+    for (int g = 1; g < s_sub_count; g++) {
+        const esp_ble_audio_bap_qos_cfg_t *q = &s_sub_preset[g].qos;
+        s_qos.sdu = q->sdu > s_qos.sdu ? q->sdu : s_qos.sdu;
+        s_qos.rtn = q->rtn > s_qos.rtn ? q->rtn : s_qos.rtn;
+        s_qos.latency = q->latency > s_qos.latency ? q->latency : s_qos.latency;
+    }
+    s_qos.pd = s_cfg.pd_us;
+
+    create.params_count = s_sub_count;
+    create.params = subgroups;
+    create.qos = &s_qos;
     create.packing = ESP_BLE_ISO_PACKING_SEQUENTIAL;
     create.encryption = encrypted();
     if (create.encryption) {
@@ -304,10 +327,12 @@ static uint8_t build_ext_adv(uint8_t *buf, size_t cap)
     const uint8_t *meta_p = s_cfg.immediate ? meta : NULL;
     const size_t meta_len = s_cfg.immediate ? sizeof(meta) : 0;
     NET_BUF_SIMPLE_DEFINE(pba, ESP_BLE_AUDIO_PBP_MIN_PBA_SIZE + 2);
-    /* PBP: High Quality = 48 kHz presets, Standard Quality = 16/24 kHz */
-    esp_ble_audio_pbp_announcement_feature_t features = ctrl_preset_rate(s_cfg.preset) == 48000
-            ? ESP_BLE_AUDIO_PBP_ANNOUNCEMENT_FEATURE_HIGH_QUALITY
-            : ESP_BLE_AUDIO_PBP_ANNOUNCEMENT_FEATURE_STANDARD_QUALITY;
+    /* PBP: High Quality = 48 kHz presets, Standard Quality = 16/24 kHz; both with two subgroups */
+    esp_ble_audio_pbp_announcement_feature_t features = 0;
+    for (int g = 0; g < s_sub_count; g++) {
+        features |= ctrl_preset_is_hq(s_sub[g].preset) ? ESP_BLE_AUDIO_PBP_ANNOUNCEMENT_FEATURE_HIGH_QUALITY
+                                                       : ESP_BLE_AUDIO_PBP_ANNOUNCEMENT_FEATURE_STANDARD_QUALITY;
+    }
     if (encrypted()) {
         features |= ESP_BLE_AUDIO_PBP_ANNOUNCEMENT_FEATURE_ENCRYPTION;
     }
@@ -350,9 +375,29 @@ esp_err_t broadcast_configure(const ctrl_config_t *cfg)
     if (cfg->preset >= AURA_PRESET_COUNT || cfg->channels >= AURA_CH_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (cfg->hq_preset != AURA_PRESET_NONE && (cfg->hq_preset >= AURA_PRESET_COUNT || cfg->hq_channels >= AURA_CH_COUNT)) {
+        return ESP_ERR_INVALID_ARG;
+    }
     s_cfg = *cfg;
-    s_preset = s_presets[cfg->preset];
-    s_stream_count = ctrl_channels_bis(cfg->channels);
+    s_sub_count = 0;
+    s_stream_count = 0;
+    const uint8_t presets[MAX_SUBGROUPS] = {cfg->preset, cfg->hq_preset};
+    const uint8_t channels[MAX_SUBGROUPS] = {cfg->channels, cfg->hq_channels};
+    for (int g = 0; g < MAX_SUBGROUPS; g++) {
+        if (presets[g] == AURA_PRESET_NONE) {
+            break;
+        }
+        broadcast_subgroup_t *sg = &s_sub[g];
+        sg->preset = presets[g];
+        sg->channels = channels[g];
+        sg->first_bis = s_stream_count;
+        sg->bis_count = ctrl_channels_bis(channels[g]);
+        sg->rate = ctrl_preset_rate(presets[g]);
+        sg->sdu_len = ctrl_preset_sdu(presets[g]);
+        s_sub_preset[g] = *s_presets[presets[g]];
+        s_stream_count += sg->bis_count;
+        s_sub_count++;
+    }
     s_broadcast_id = cfg->broadcast_id == AURA_BROADCAST_ID_RANDOM ? (esp_random() & 0xFFFFFF) : cfg->broadcast_id;
     return ESP_OK;
 }
@@ -362,7 +407,7 @@ esp_err_t broadcast_start(broadcast_tick_cb_t tick, void *arg)
     static uint8_t ext[64];
     static uint8_t per[160];
 
-    if (s_preset == NULL) {
+    if (s_sub_count == 0) {
         return ESP_ERR_INVALID_STATE;
     }
     s_tick = tick;
@@ -400,10 +445,15 @@ esp_err_t broadcast_start(broadcast_tick_cb_t tick, void *arg)
         ESP_LOGE(TAG, "source start failed, err %d", err);
         return err;
     }
-    ESP_LOGI(TAG, "started name='%s' id=0x%06lx preset=%s channels=%s bis=%u enc=%d context=0x%04x pd=%u us "
-             "immediate=%d", s_cfg.name, (unsigned long)s_broadcast_id, s_preset_names[s_cfg.preset],
-             s_channel_names[s_cfg.channels], s_stream_count, encrypted(), s_cfg.context, s_cfg.pd_us,
-             s_cfg.immediate);
+    ESP_LOGI(TAG, "started name='%s' id=0x%06lx subgroups=%u bis=%u enc=%d pd=%u us immediate=%d "
+             "qos sdu=%u rtn=%u latency=%u ms", s_cfg.name, (unsigned long)s_broadcast_id, s_sub_count,
+             s_stream_count, encrypted(), s_cfg.pd_us, s_cfg.immediate, s_qos.sdu, s_qos.rtn, s_qos.latency);
+    for (int g = 0; g < s_sub_count; g++) {
+        ESP_LOGI(TAG, "subgroup %d: preset=%s channels=%s bis=%u..%u sdu=%u context=0x%04x", g,
+                 s_preset_names[s_sub[g].preset], s_channel_names[s_sub[g].channels], s_sub[g].first_bis,
+                 s_sub[g].first_bis + s_sub[g].bis_count - 1, s_sub[g].sdu_len,
+                 g == 0 ? s_cfg.context : s_cfg.hq_context);
+    }
     return ESP_OK;
 }
 
@@ -417,9 +467,36 @@ uint8_t broadcast_stream_count(void)
     return s_stream_count;
 }
 
-uint32_t broadcast_sample_rate(void)
+uint8_t broadcast_subgroup_count(void)
 {
-    return ctrl_preset_rate(s_cfg.preset);
+    return s_sub_count;
+}
+
+const broadcast_subgroup_t *broadcast_subgroup(uint8_t idx)
+{
+    return idx < s_sub_count ? &s_sub[idx] : NULL;
+}
+
+static const broadcast_subgroup_t *bis_subgroup(uint8_t bis)
+{
+    for (int g = 0; g < s_sub_count; g++) {
+        if (bis >= s_sub[g].first_bis && bis < s_sub[g].first_bis + s_sub[g].bis_count) {
+            return &s_sub[g];
+        }
+    }
+    return NULL;
+}
+
+uint16_t broadcast_bis_sdu_len(uint8_t bis)
+{
+    const broadcast_subgroup_t *sg = bis_subgroup(bis);
+    return sg ? sg->sdu_len : 0;
+}
+
+uint32_t broadcast_bis_rate(uint8_t bis)
+{
+    const broadcast_subgroup_t *sg = bis_subgroup(bis);
+    return sg ? sg->rate : 0;
 }
 
 uint32_t broadcast_id(void)
@@ -435,14 +512,14 @@ uint32_t broadcast_frames_wanted(void)
     return tx_pairs_wanted(s_seq, (uint16_t)atomic_load(&s_last_done), BROADCAST_TX_DEPTH);
 }
 
-esp_err_t broadcast_send_frame(const uint8_t *const sdu[], uint16_t len)
+esp_err_t broadcast_send_frame(const uint8_t *const sdu[], const uint16_t len[])
 {
     if (!broadcast_streaming()) {
         return ESP_ERR_INVALID_STATE;
     }
     esp_err_t ret = ESP_OK;
     for (int i = 0; i < s_stream_count; i++) {
-        esp_err_t err = esp_ble_audio_bap_stream_send(&s_streams[i].stream, sdu[i], len, s_seq);
+        esp_err_t err = esp_ble_audio_bap_stream_send(&s_streams[i].stream, sdu[i], len[i], s_seq);
         if (err) {
             atomic_fetch_add(&s_send_err, 1);
             ret = err;
@@ -459,11 +536,6 @@ void broadcast_reset_in_flight(void)
     atomic_fetch_add(&s_wd_refills, 1);
 }
 
-uint16_t broadcast_sdu_len(void)
-{
-    return s_preset ? s_preset->qos.sdu : 0;
-}
-
 void broadcast_get_stats(broadcast_stats_t *out, bool reset_window)
 {
     out->sent = atomic_load(&s_sent);
@@ -475,7 +547,7 @@ void broadcast_get_stats(broadcast_stats_t *out, bool reset_window)
     out->tick_us_mean = s_tick_n ? (double)s_tick_sum / s_tick_n : 0.0;
     int64_t span = s_last_tick_us - s_first_tick_us;
     out->bt_ppm = (s_ticks_total > 1 && span > 0)
-                  ? ((double)(s_ticks_total - 1) * s_preset->qos.interval / (double)span - 1.0) * 1e6 : 0.0;
+                  ? ((double)(s_ticks_total - 1) * s_qos.interval / (double)span - 1.0) * 1e6 : 0.0;
     if (reset_window) {
         s_tick_min = UINT32_MAX;
         s_tick_max = 0;

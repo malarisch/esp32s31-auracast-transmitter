@@ -13,6 +13,18 @@
 /* SDUs kept queued in the controller per BIS */
 #define BROADCAST_TX_DEPTH 2
 
+/* BIS in the BIG: up to two subgroups (Standard Quality + High Quality) with one or two BIS each */
+#define BROADCAST_MAX_BIS 4
+
+typedef struct {
+    uint8_t preset;        /* AURA_PRESET_* */
+    uint8_t channels;      /* AURA_CH_* */
+    uint8_t first_bis;     /* index of its first BIS */
+    uint8_t bis_count;     /* 1 or 2 */
+    uint32_t rate;         /* LC3 sample rate: 16000, 24000 or 48000 */
+    uint16_t sdu_len;      /* octets per LC3 frame (40/60/100/120/155) */
+} broadcast_subgroup_t;
+
 /* Runs in the ISO task: only notify, never block */
 typedef void (*broadcast_tick_cb_t)(void *arg);
 
@@ -35,11 +47,16 @@ esp_err_t broadcast_start(broadcast_tick_cb_t tick, void *arg);
 /* All BIS are in STREAMING state */
 bool broadcast_streaming(void);
 
-/* Number of BIS: 2 for stereo, 1 for mono */
+/* Total number of BIS in the BIG (1..BROADCAST_MAX_BIS) */
 uint8_t broadcast_stream_count(void);
 
-/* LC3 sample rate of the BIS: 16000, 24000 or 48000 */
-uint32_t broadcast_sample_rate(void);
+/* Subgroups: 1 (SQ or HQ alone) or 2 (SQ first, then HQ) */
+uint8_t broadcast_subgroup_count(void);
+const broadcast_subgroup_t *broadcast_subgroup(uint8_t idx);
+
+/* Properties of one BIS (0..broadcast_stream_count()-1) */
+uint16_t broadcast_bis_sdu_len(uint8_t bis);
+uint32_t broadcast_bis_rate(uint8_t bis);
 
 /* Broadcast_ID in use (24 bit) */
 uint32_t broadcast_id(void);
@@ -47,14 +64,11 @@ uint32_t broadcast_id(void);
 /* SDU sets (one SDU per BIS) the controller queue can take now: BROADCAST_TX_DEPTH - in flight (stream 0) */
 uint32_t broadcast_frames_wanted(void);
 
-/* Sends broadcast_stream_count() SDUs, one per BIS, with the same sequence number */
-esp_err_t broadcast_send_frame(const uint8_t *const sdu[], uint16_t len);
+/* Sends broadcast_stream_count() SDUs, one per BIS with its own length, with the same sequence number */
+esp_err_t broadcast_send_frame(const uint8_t *const sdu[], const uint16_t len[]);
 
 /* Watchdog recovery: assume the controller queue is empty */
 void broadcast_reset_in_flight(void);
-
-/* SDU length of the active preset (40/60/100/120/155 bytes) */
-uint16_t broadcast_sdu_len(void);
 
 void broadcast_get_stats(broadcast_stats_t *out, bool reset_window);
 
