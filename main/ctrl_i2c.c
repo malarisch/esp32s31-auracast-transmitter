@@ -5,14 +5,22 @@
  * events; the control task applies them to the register file:
  *   receive (master write, also the register address of a write_read) -> drop leftover TX data, ctrl_regs_write()
  *   request (master read; SCL is stretched until i2c_slave_write())   -> AURA_READ_MAX bytes from the pointer
- * A master read that stops early leaves bytes in the TX FIFO; they are dropped at the next write, so every
- * read must set the register pointer first (write_read), as the protocol requires.
+ * A master read that stops early leaves bytes in the TX FIFO. They are dropped before the next fill (and at the
+ * next write), but the slave hardware has by then pre-loaded one of them into its shift register, which the FIFO
+ * reset does not reach (only the FSM reset of i2c_slave_reset_tx_fifo() does, and that is allowed only after a
+ * completed read, for which there is no callback). That byte prefixes the next read. Hence the protocol: every
+ * read sets the register pointer first (write_read) and takes exactly AURA_READ_MAX bytes, draining the FIFO.
  *
- * Why at most AURA_READ_MAX (31) bytes per read: i2c_slave_write() puts fewer bytes than the free hardware FIFO
- * (32) straight into the FIFO, more go through the driver's ring buffer. Leftovers in the FIFO alone can be
- * dropped with a plain TX FIFO reset. i2c_slave_reset_tx_fifo() would also drain the ring buffer, but it resets
- * the SCL state machine as well, and the receive event of a write_read arrives while the slave stretches SCL
- * for the read: the IDF documents that reset for after a completed read only.
+ * Why at most AURA_READ_MAX (31) bytes per read, and why the FIFO is reset right before every fill:
+ * i2c_slave_write() puts only as many bytes as the hardware FIFO (32) has free straight into the FIFO; the rest
+ * goes through the driver's ring buffer, from where the driver's ISR refills the FIFO whenever it drains. Bytes
+ * in the ring buffer survive a plain TX FIFO reset and would be served to every later read, in front of the real
+ * data (seen on the bench: a register-less read after a short read left 23 bytes in the FIFO, the next fill
+ * overflowed into the ring buffer, and from then on every write_read returned stale register contents). With an
+ * empty FIFO at fill time, 31 bytes always fit and the ring buffer is never used. i2c_slave_reset_tx_fifo()
+ * would also drain the ring buffer, but it resets the SCL state machine as well, and the receive event of a
+ * write_read arrives while the slave stretches SCL for the read: the IDF documents that reset for after a
+ * completed read only.
  */
 #include <string.h>
 
@@ -129,10 +137,15 @@ static void handle_request(void)
     ctrl_regs_read(&s_regs, buf, sizeof(buf));
     /* The master reads fewer bytes in general: the pointer follows what was queued, not what was clocked out */
     xSemaphoreGive(s_lock);
+    /* Whatever a shorter (or register-less) read left behind goes first, so the FIFO is empty and the whole
+     * answer fits into it; nothing must ever reach the driver's ring buffer (see the file comment). */
+    drop_tx_leftovers();
     uint32_t written = 0;
     esp_err_t err = i2c_slave_write(s_dev, buf, sizeof(buf), &written, 50);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "slave write failed: %s", esp_err_to_name(err));
+    } else if (written != sizeof(buf)) {
+        ESP_LOGW(TAG, "slave write queued %u of %u bytes", (unsigned)written, (unsigned)sizeof(buf));
     }
 }
 

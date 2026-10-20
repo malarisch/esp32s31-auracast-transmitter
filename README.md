@@ -1,273 +1,445 @@
 # AES67 → Auracast Bridge (ESP32-S31)
 
-Firmware für das **ESP32-S31-Function-CoreBoard-1** (V1.0). Der ESP32-S31 empfängt
-48-kHz-Stereo-PCM als I2S-Slave von einem FPGA (AES67, PTP-Takt) und sendet es als
-Auracast-Broadcast (Bluetooth LE Audio, LC3). Die Taktabweichung zwischen PTP und dem
-Modul-Quarz gleicht ein geregelter Software-Resampler aus.
+Firmware for the **ESP32-S31-Function-CoreBoard-1** (V1.0) that turns an AES67 audio stream into an **Auracast**
+broadcast (Bluetooth LE Audio, LC3). It is built for live sound: the PA feed goes straight into hearing aids and
+LE Audio receivers, so latency is kept low (about 60 ms from the I2S input to playback in the default mode).
 
-Die Stream-Konfiguration kommt zur Laufzeit über **I2C** (S31 = Slave) von der Zephyr-Firmware des
-Audio-Interface-Boards: Nach dem Boot wartet der S31, bis der Master konfiguriert und START schickt (siehe
-[I2C-Steuerung](#i2c-steuerung)). Einstellbar sind u. a.:
+An FPGA receives AES67 and outputs 48 kHz stereo PCM over I2S, clocked from PTP. The ESP32-S31 is the I2S slave.
+Its Bluetooth clock comes from the module crystal and drifts against PTP. A software resampler, steered by a
+control loop on the input FIFO fill level, absorbs that drift. A host controller configures the stream at runtime
+over **I2C**. On the target board this is a second ESP running Zephyr, the board's network and control stack.
 
-- **Preset:** 16_2_1, 24_2_1 (Standard Quality, für Hörgeräte) oder 48_2_1 / 48_4_1 / 48_6_1 (High Quality), alle
-  mit 10-ms-Frames.
-- **Kanäle:** ein Mono-BIS (L+R)/2, nur L oder nur R, oder zwei BIS links/rechts.
-- Name, Broadcast-Code, Streaming-Kontext, Immediate-Rendering-Flag, Presentation Delay, Sendeleistung,
-  FIFO-Sollwert, Broadcast_ID.
+```
+AES67 ──► FPGA ──I2S (48 kHz, PTP clock)──► ESP32-S31 ──LE Audio (LC3, 1 or 2 BIS)──► hearing aids,
+                                                ▲                                        LE Audio receivers
+                       Zephyr host ───I2C───────┘  (configuration, START/RESET, status)
+```
 
-Die Werte nach dem Boot entsprechen dem **Live-Modus für Hörgeräte:** ein Mono-BIS (L+R)/2, LC3 24_2_1 (24 kHz,
-60 Byte), Kontext *Live*, Immediate-Rendering-Flag, Presentation Delay 20 ms. Für Livesound, bei dem die Zuhörer
-auch den Raum hören: Viele Hörgeräte empfangen nur Standard Quality, und die Latenz ist kleiner. Bisheriger
-HQ-Modus = 48_4_1, Stereo, Kontext *Media* (0x0004), 40 ms.
+## Contents
 
-Design: [docs/superpowers/specs/2026-10-17-auracast-s31-design.md](docs/superpowers/specs/2026-10-17-auracast-s31-design.md)
+- [Features](#features)
+- [Hardware and wiring](#hardware-and-wiring)
+- [Building and flashing](#building-and-flashing)
+- [Operation](#operation)
+- [I2C control protocol](#i2c-control-protocol)
+- [Build-time configuration](#build-time-configuration)
+- [Serial log](#serial-log)
+- [Bench testing without a host](#bench-testing-without-a-host)
+- [PC tools](#pc-tools)
+- [Latency](#latency)
+- [Known issues and limitations](#known-issues-and-limitations)
+- [Repository layout and tests](#repository-layout-and-tests)
+- [Verification log](#verification-log)
 
-## Verdrahtung (FPGA → Stiftleiste J2)
+## Features
 
-| Signal | J2-Pin | GPIO |
-|---|---|---|
-| BCLK (3,072 MHz) | J2-19 | GPIO40 |
-| WS / LRCLK (48 kHz) | J2-20 | GPIO42 |
-| DATA | J2-21 | GPIO39 |
-| I2C SDA (vom Master) | J2-17 | GPIO43 |
-| I2C SCL (vom Master) | J2-18 | GPIO44 |
-| GND | J2-33 | — |
+- **I2S slave input:** 48 kHz, 2 × 32-bit slots, 24-bit data. Clock drift is compensated by an adaptive
+  polyphase resampler driven by a PI controller. The firmware also detects a missing clock or a wrong input rate.
+- **Auracast source:** BAP broadcast source with a Public Broadcast Announcement and a Broadcast_Name, optionally
+  encrypted.
+- **LC3 presets** (all 10 ms frames): 16_2_1 and 24_2_1 (Standard Quality, receivable by hearing aids), and
+  48_2_1 / 48_4_1 / 48_6_1 (High Quality).
+- **Channel modes:** one mono BIS carrying (L+R)/2, left only or right only; or two BIS (front left / front right).
+- **Runtime configuration over I2C:** preset, channel mode, streaming context, Immediate Rendering flag,
+  presentation delay, TX power, FIFO set point, Broadcast_ID, name and code. A status block is readable over I2C.
+- **Low-latency defaults for hearing aids:** 24_2_1 mono, *Live* context, Immediate Rendering flag, 20 ms
+  presentation delay.
+- **PC tools:** subscribe to the broadcast with BlueZ, and measure the end-to-end latency against the AES67 reference.
 
-Pegel 3,3 V LVCMOS. Für I2C sind die internen Pull-ups an; am Bus gehören trotzdem externe Pull-ups hin. Die GPIOs lassen sich in `idf.py menuconfig` → *AES67 Auracast bridge* ändern.
+## Hardware and wiring
 
-## I2S-Format
+All signals go to header **J2**. Levels are 3.3 V LVCMOS. The GPIOs can be changed in `idf.py menuconfig`.
 
-- Philips-I2S, ESP ist Slave (BCLK und WS kommen vom FPGA), kein MCLK
-- 48000 Hz, 2 Slots × 32 Bit (64 BCLK pro Frame)
-- 24-Bit-Daten MSB-first, linksbündig im 32-Bit-Slot
-- Der ESP tastet DATA per Default auf der **fallenden** BCLK-Flanke ab (`Sample DATA on the falling BCLK edge`):
-  Der FPGA wechselt DATA kurz nach der steigenden Flanke, und der S31-Slave tastet erst 80–120 ns nach der Flanke
-  ab (Synchronisierung mit 8 × BCLK). Auf der steigenden Flanke trifft er den Datenwechsel: Bits einen Takt zu
-  früh oder zufällig, hörbar als schnelles Klacken (~17 Hz, Schwebung zwischen den Takten). Ein DAC tastet direkt
-  auf der Flanke ab und merkt davon nichts. Ein Sender, der DATA I2S-konform auf der fallenden Flanke wechselt,
-  braucht die Option aus.
+| Signal | From | J2 pin | GPIO |
+|---|---|---|---|
+| I2S BCLK (3.072 MHz) | FPGA | J2-19 | GPIO40 |
+| I2S WS / LRCLK (48 kHz) | FPGA | J2-20 | GPIO42 |
+| I2S DATA | FPGA | J2-21 | GPIO39 |
+| I2C SDA | host | J2-17 | GPIO43 |
+| I2C SCL | host | J2-18 | GPIO44 |
+| GND | | J2-33 | — |
 
-## Build & Flash
+The internal pull-ups are enabled on SDA and SCL, but the bus should still have proper external pull-ups.
+
+### I2S format
+
+- Philips I2S. The ESP is the slave: BCLK and WS come from the FPGA. No MCLK.
+- 48000 Hz, 2 slots × 32 bit (64 BCLK per frame), 24-bit data MSB first, left-aligned in the slot.
+- **DATA is sampled on the falling BCLK edge** by default (`Sample DATA on the falling BCLK edge`):
+  - The FPGA changes DATA shortly after the rising edge.
+  - The S31 slave samples 80–120 ns after the edge, because it synchronises its inputs to an internal clock of
+    8 × BCLK. On the rising edge it therefore hits the data transition: bits arrive one clock early or at random,
+    which is heard as fast clicking.
+  - A DAC samples exactly on the edge and never notices.
+  - A transmitter that changes DATA on the falling edge, as the I2S specification says, needs this option off.
+
+## Building and flashing
+
+Requires **ESP-IDF `release/v6.1`**, not the v6.1 tag: the branch has the BIS TX-power fix (esp-idf#18946) and
+updated S31 Bluetooth controller libraries. The S31 is a preview target in v6.1.
 
 ```bash
-. ~/.espressif/tools/activate_idf_v6.1.sh      # ESP-IDF release/v6.1
-idf.py --preview set-target esp32s31           # S31 ist in v6.1 ein Preview-Target
+. ~/.espressif/tools/activate_idf_v6.1.sh
+idf.py --preview set-target esp32s31      # once
 idf.py build
-PORT=/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_64a7b6c7d0bcf011a704167148e9de0f-if00-port0
+PORT=/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_<serial>-if00-port0
 idf.py -p $PORT flash
-mkdir -p logs && python tools/serial_log.py --port $PORT --seconds 10 --reset | tee logs/boot.log
+python tools/serial_log.py --port $PORT --seconds 10 --reset      # boot log
 ```
 
-Flashen und Logs laufen über den **USB-UART-Port (CP2102N)** mit **115200 Baud** (Default von `serial_log.py`). Der USB-Serial/JTAG-Port
-bricht auf diesem Board nach einigen Sekunden weg (esp-idf#19221).
+Flash and log through the **CP2102N USB-UART port** at 115200 baud. The USB Serial/JTAG port of this board drops
+out after a few seconds (esp-idf#19221). From a non-interactive shell, run everything inside one
+`bash -c '. ~/.espressif/tools/activate_idf_v6.1.sh && …'`: `idf.py` and the IDF `python` are only on the `PATH`
+after activation.
 
-## Konfiguration (menuconfig → *AES67 Auracast bridge*)
+## Operation
 
-| Option | Default | Bedeutung |
-|---|---|---|
-| I2S input → BCLK/WS/DATA GPIO | 40 / 42 / 39 | Pins an J2 |
-| Sample DATA on the falling BCLK edge | an | siehe I2S-Format; Kontrolle über `i2s bits=` |
-| Slave sampling clock (bclk_div) | 8 × BCLK | interner Abtasttakt des Slaves; verschiebt den Abtastzeitpunkt (16 war am FPGA schlechter) |
-| I2C control → slave address | 0x3A | 7 Bit |
-| I2C control → SDA / SCL GPIO | 43 / 44 | Pins an J2 |
-| I2C control → Start at boot (AUTOSTART) | aus | sendet sofort mit den Werten nach dem Boot, ohne I2C-Master (Tisch-Aufbau, Latenzmessung) |
-| Audio source | I2S | `SYNTH` = 440/880 Hz direkt, ohne I2S (Empfänger testen) |
-| Debug: skip send / ignore completion | 0 | nur für Tests der Pacing-Selbstheilung |
+1. **Boot:** Bluetooth is initialised and the I2C slave starts, about 0.6 s after reset. Nothing is broadcast yet.
+   `STATE` reads `WAIT_CONFIG`.
+2. **Configure:** the host writes the configuration registers in any order. Registers it leaves alone keep their
+   power-on values (the Live defaults).
+3. **START:** the S31 validates the configuration.
+   - If a value is invalid, it reports `CONFIG_ERROR` with the offending register and keeps waiting.
+   - Otherwise it starts the I2S input, the encoder pipeline and the broadcast: `STARTING`, then `STREAMING` once
+     all BIS are up (about 0.5 s).
+4. **Change:** the configuration is locked while broadcasting. To change it, the host sends **RESET**; the S31
+   restarts and goes back to step 1.
 
-## I2C-Steuerung
+The configuration lives in RAM only. After any restart, including a watchdog reset or brownout, the S31 waits for
+the host again. `RESET_REASON` tells the host why it restarted.
 
-Das Protokoll steht vollständig in
-[components/ctrl_regs/include/auracast_i2c_regs.h](components/ctrl_regs/include/auracast_i2c_regs.h). Der Header
-hängt nur von `<stdint.h>` ab und kann so in die Zephyr-Firmware übernommen werden.
+Inside the pipeline, the encoder task produces one SDU per BIS whenever the controller has room in its queue,
+paced by the Bluetooth "sent" callbacks. The I2S input goes through these states:
 
-- 7-Bit-Adresse 0x3A, 100 oder 400 kHz. 8-Bit-Registeradresse, Auto-Inkrement, Mehrbytewerte Little Endian.
-- Schreiben: `[reg][daten…]` (Zephyr: `i2c_burst_write`). Lesen: `[reg]`, Repeated Start, N Byte
-  (`i2c_write_read`). **Vor jedem Lesen den Registerzeiger setzen**: Ein Lesen ohne vorangehendes Schreiben liefert
-  Reste des letzten Lesezugriffs.
-- **Höchstens 31 Byte pro Lesezugriff** (eine Füllung der Hardware-FIFO). NAME (32 Byte) und den Statusblock
-  (44 Byte) in zwei Zugriffen lesen. Mehr gelesene Bytes sind ungültig.
-- NAME und CODE immer **ganz** schreiben, mit 0x00 aufgefüllt; sonst bleibt der Rest des alten Werts stehen.
-- Beim Lesen hält der S31 SCL fest, bis die Antwort bereitsteht (typisch deutlich unter 1 ms). Der Master muss
-  **Clock Stretching** zulassen.
-- Abgelehnte Schreibzugriffe werden trotzdem geACKt; sie setzen `ERROR` und `ERROR_REG`. Die beiden zeigen die
-  letzte Ablehnung; erst ein angenommenes START löscht sie.
+```
+NO_SIGNAL ──clock present──► PRIME ──FIFO at set point, rate OK──► RUN
+RUN ──clock lost──► NO_SIGNAL        RUN ──underrun / overflow──► PRIME
+RUN or PRIME ──input rate off by more than ±600 ppm (e.g. 44.1 kHz)──► RATE_ERROR ──5 s──► NO_SIGNAL
+```
 
-Ablauf:
+Outside `RUN` the broadcast keeps running and carries encoded silence. After a gap, the controller restarts from
+the last learned clock ratio (warm start).
 
-1. Nach dem Boot ist `STATE` = WAIT_CONFIG (0); es wird nichts gesendet. `MAGIC` (0x00) liest `AURA`.
-2. Der Master schreibt die Konfiguration (0x10–0x4F), beliebige Reihenfolge, nur was von den Werten nach dem Boot
-   abweicht.
-3. `COMMAND` (0x0C) = 0x5A (START): Der S31 prüft alles. Bei einem Fehler ist `STATE` = CONFIG_ERROR (3),
-   `ERROR` = BAD_VALUE (3) und `ERROR_REG` zeigt auf das Feld; korrigieren und START erneut. Sonst STARTING (1), nach
-   etwa 0,5 s STREAMING (2). FAULT (4) heißt: Der Bluetooth-Stack hat abgelehnt, nur RESET hilft.
-4. Ab STARTING sind die Konfigurationsregister gesperrt (`ERROR` = LOCKED). Ändern: `COMMAND` = 0xA5 (RESET). Der
-   S31 startet etwa 10 ms später neu und antwortet nach rund 0,6 s wieder auf seine Adresse (der I2C-Slave startet
-   nach der Bluetooth-Initialisierung; im Log bei 553 ms nach dem App-Start). Die Konfiguration liegt nur im RAM: Nach jedem Neustart, auch
-   durch Watchdog oder Brownout, wartet der S31 wieder (`RESET_REASON` 0x0B sagt, warum er neu gestartet ist).
+## I2C control protocol
 
-| Adr. | Register | Bytes | Inhalt (Wert nach dem Boot) |
+The complete protocol is defined in
+[`components/ctrl_regs/include/auracast_i2c_regs.h`](components/ctrl_regs/include/auracast_i2c_regs.h). The header
+depends only on `<stdint.h>` and is meant to be copied into the host firmware.
+
+### Bus rules
+
+- 7-bit address **0x3A** (Kconfig), 100 or 400 kHz.
+- 8-bit register address with auto-increment (0xFF wraps to 0x00). Multi-byte values are **little endian**.
+- **Write:** `[reg][data…]`, for example Zephyr `i2c_burst_write()`.
+- **Read:** `[reg]`, repeated start, read N bytes, for example Zephyr `i2c_burst_read()` / `i2c_write_read()`.
+  - **Always set the register address before reading.** A read without it returns leftovers of the previous read.
+  - **Exactly 31 bytes per read**, one fill of the hardware TX FIFO. Read NAME (32 bytes) and the status block
+    (44 bytes) in two parts (e.g. 0x80 and 0x8D). Bytes beyond 31 are invalid. A shorter read leaves bytes in the
+    FIFO; the slave hardware then pre-loads one of them into its shift register, where no FIFO reset reaches it,
+    and that byte prefixes every later read until a 32-byte read drains it. Reading the whole fill avoids this.
+- **Clock stretching:** at the start of a read the S31 holds SCL low until the data is ready, typically well below
+  1 ms. The host's I2C master must allow clock stretching.
+- **Rejected writes are still ACKed.** They set `ERROR` and `ERROR_REG` instead. Both hold the last rejection and
+  are cleared by an accepted START.
+- **NAME and CODE:** always write the whole field, padded with 0x00. Otherwise the tail of the old value remains.
+
+### Register map
+
+Power-on values are in **bold**.
+
+| Addr | Register | Size | Access | Content |
+|---|---|---|---|---|
+| 0x00 | MAGIC | 4 | R | `'A' 'U' 'R' 'A'` |
+| 0x04 | PROTO_VERSION | 1 | R | 1 |
+| 0x05 | FW_VERSION | 3 | R | major, minor, patch |
+| 0x08 | STATE | 1 | R | 0 WAIT_CONFIG, 1 STARTING, 2 STREAMING, 3 CONFIG_ERROR, 4 FAULT |
+| 0x09 | ERROR | 1 | R | 0 NONE, 1 READ_ONLY, 2 LOCKED, 3 BAD_VALUE, 4 BAD_COMMAND, 5 START_FAILED |
+| 0x0A | ERROR_REG | 1 | R | register address the error refers to |
+| 0x0B | RESET_REASON | 1 | R | `esp_reset_reason_t` of the last restart |
+| 0x0C | COMMAND | 1 | W | 0x5A START, 0xA5 RESET (reads 0) |
+| 0x10 | PRESET | 1 | RW | 0 16_2_1, **1 24_2_1**, 2 48_2_1, 3 48_4_1, 4 48_6_1 |
+| 0x11 | CHANNELS | 1 | RW | **0 mono (L+R)/2**, 1 stereo (2 BIS), 2 mono left, 3 mono right |
+| 0x12 | CONTEXT | 2 | RW | streaming context bit mask, non-zero, bits 0x0FFF only (**0x0040 Live**, 0x0004 Media) |
+| 0x14 | FLAGS | 1 | RW | bit 0: Immediate Rendering flag (**1**); other bits must be 0 |
+| 0x15 | TX_POWER | 1 | RW | int8 dBm, −15…20 (**9**), rounded down to a supported level |
+| 0x16 | PD_US | 2 | RW | presentation delay, 20000…40000 µs (**20000**) |
+| 0x18 | FIFO_TARGET | 2 | RW | input FIFO set point, 840…3000 frames at 48 kHz (**840**) |
+| 0x1A | BROADCAST_ID | 4 | RW | 0…0xFFFFFF, or **0xFFFFFFFF = random** at every start |
+| 0x20 | NAME | 32 | RW | Broadcast_Name, UTF-8, 4…32 bytes, padded with 0x00 (**`AES67 Auracast`**) |
+| 0x40 | CODE | 16 | RW | Broadcast_Code, 0…16 bytes, padded with 0x00; **empty = unencrypted** |
+| 0x80 | Status block | 44 | R | see below, refreshed every 500 ms |
+
+Configuration registers are writable in `WAIT_CONFIG` and `CONFIG_ERROR`; afterwards writes are ignored with
+`ERROR = LOCKED`. Writes to read-only or reserved addresses set `ERROR = READ_ONLY`. Reserved addresses read 0.
+
+At START the S31 checks every range above and requires a name of at least 4 bytes. A value the Bluetooth stack
+still refuses leads to `FAULT` / `START_FAILED`; only RESET helps.
+
+### Status block
+
+The status block is meaningful from `STARTING` on.
+
+| Addr | Field | Size | Content |
 |---|---|---|---|
-| 0x00 | MAGIC | 4 | `AURA` |
-| 0x04 | PROTO_VERSION / FW_VERSION | 1 / 3 | 1 / 1.0.0 |
-| 0x08 | STATE, ERROR, ERROR_REG, RESET_REASON | je 1 | s. o. |
-| 0x0C | COMMAND | 1 | 0x5A START, 0xA5 RESET |
-| 0x10 | PRESET | 1 | 0 = 16_2_1, **1 = 24_2_1**, 2 = 48_2_1, 3 = 48_4_1, 4 = 48_6_1 |
-| 0x11 | CHANNELS | 1 | **0 = Mono (L+R)/2**, 1 = Stereo (2 BIS), 2 = Mono L, 3 = Mono R |
-| 0x12 | CONTEXT | 2 | Streaming-Context-Bitmaske, nur Bits 0x0FFF (**0x0040 Live**, 0x0004 Media) |
-| 0x14 | FLAGS | 1 | Bit 0 Immediate Rendering (**1**) |
-| 0x15 | TX_POWER | 1 | int8 dBm, −15…20 (**9**) |
-| 0x16 | PD_US | 2 | Presentation Delay 20000…40000 µs (**20000**) |
-| 0x18 | FIFO_TARGET | 2 | FIFO-Sollwert 840…3000 Frames (**840**) |
-| 0x1A | BROADCAST_ID | 4 | 0…0xFFFFFF, **0xFFFFFFFF = zufällig** pro Start |
-| 0x20 | NAME | 32 | UTF-8, 4…32 Byte, mit 0x00 aufgefüllt (**AES67 Auracast**) |
-| 0x40 | CODE | 16 | Broadcast-Code, mit 0x00 aufgefüllt; **leer = unverschlüsselt** |
-| 0x80 | Status | 44 | Pipeline-Zustand, I2S-Signal/BIS-Flags, FIFO-Füllung, Drift und Eingangsrate (0,01 ppm), `i2s bits`, Zähler (underrun, overflow, lost, send_err, sent), aktive Broadcast_ID, Uptime; alle 500 ms aktualisiert |
+| 0x80 | PIPE_STATE | 1 | 0 NO_SIGNAL, 1 PRIME, 2 RUN, 3 RATE_ERROR |
+| 0x81 | STATUS_FLAGS | 1 | bit 0: I2S clock present, bit 1: all BIS streaming |
+| 0x82 | FIFO_FILL | 2 | input FIFO fill, frames at 48 kHz |
+| 0x84 | DRIFT_CPPM | 4 | int32, resampler correction in 0.01 ppm |
+| 0x88 | IN_CPPM | 4 | int32, measured input rate against 48 kHz in 0.01 ppm |
+| 0x8C | I2S_BITS | 4 | OR of all raw I2S slot words since the last refresh; must end in `00` for 24-bit data |
+| 0x90 | UNDERRUN | 4 | FIFO underruns |
+| 0x94 | OVERFLOW | 4 | FIFO overflows |
+| 0x98 | LOST | 4 | I2S clock losses while running |
+| 0x9C | SEND_ERR | 4 | SDUs refused by the controller |
+| 0xA0 | SENT | 4 | SDU sets sent |
+| 0xA4 | ACTIVE_ID | 4 | Broadcast_ID in use |
+| 0xA8 | UPTIME_MS | 4 | ms since boot |
 
-Host-Tests der Registerdatei:
+### Example (Zephyr, sketch)
 
-```bash
-cmake -S components/ctrl_regs/host_test -B build_host_ctrl && cmake --build build_host_ctrl && ctest --test-dir build_host_ctrl --output-on-failure
+```c
+#include "auracast_i2c_regs.h"
+
+const uint8_t addr = AURA_I2C_DEFAULT_ADDR;
+uint8_t magic[4], state;
+
+i2c_burst_read(bus, addr, AURA_REG_MAGIC, magic, sizeof(magic));     /* "AURA" */
+
+uint8_t preset = AURA_PRESET_48_4_1, channels = AURA_CH_STEREO;
+uint8_t ctx[2] = {0x04, 0x00};                                         /* Media */
+uint8_t name[AURA_NAME_SIZE] = "Main Hall";                            /* rest zero-padded */
+i2c_burst_write(bus, addr, AURA_REG_PRESET, &preset, 1);
+i2c_burst_write(bus, addr, AURA_REG_CHANNELS, &channels, 1);
+i2c_burst_write(bus, addr, AURA_REG_CONTEXT, ctx, sizeof(ctx));
+i2c_burst_write(bus, addr, AURA_REG_NAME, name, sizeof(name));
+
+uint8_t cmd = AURA_CMD_START;
+i2c_burst_write(bus, addr, AURA_REG_COMMAND, &cmd, 1);
+i2c_burst_read(bus, addr, AURA_REG_STATE, &state, 1);                 /* STARTING, later STREAMING */
 ```
 
-## Testbetrieb ohne FPGA
+## Build-time configuration
 
-**FPGA vorher abziehen**, sonst treiben zwei Quellen dieselben Pins.
+`idf.py menuconfig` → *AES67 Auracast bridge*. Everything that describes the stream is set over I2C. Kconfig only
+holds what depends on the board.
 
-- `Test mode → Generate test tone`: I2S1 erzeugt als Master 440 Hz links / 880 Hz rechts (−12 dBFS)
-  auf den Eingangspins; die I2S0-Eingänge werden intern über die GPIO-Matrix zurückgeführt.
-- `Test tone sample rate`: absichtlich neben 48000 Hz, um Drift zu erzeugen. Der XTAL-Teiler
-  trifft nicht jede Rate exakt: 48002 Hz → real +41,74 ppm, 47998 Hz → real −34,04 ppm,
-  48100 Hz → real +2081 ppm (Fehlerfall „falsche Samplerate“).
-- `Delay before the test tone starts`: prüft den Start mit spätem I2S-Signal.
-- `Switch the test tone off for 2 s every 30 s`: prüft Taktverlust und Wiederanlauf.
-- Im Testbetrieb loggt die Pipeline zusätzlich `tone check (after resampler): L=…Hz R=…Hz`
-  — damit lassen sich Kanalzuordnung und Resampling ohne Empfänger prüfen.
+| Option | Default | Meaning |
+|---|---|---|
+| I2S input → BCLK / WS / DATA GPIO | 40 / 42 / 39 | pins on J2 |
+| Sample DATA on the falling BCLK edge | on | see [I2S format](#i2s-format); check with `i2s bits` |
+| Slave sampling clock (bclk_div) | 8 × BCLK | internal sampling clock of the slave; 16 was worse on the FPGA |
+| I2C control → slave address | 0x3A | 7-bit |
+| I2C control → SDA / SCL GPIO | 43 / 44 | pins on J2 |
+| I2C control → AUTOSTART | off | broadcast right after boot with the power-on values, without a host (bench use) |
+| Audio source | I2S | `SYNTH`: 440/880 Hz generated internally, no I2S (receiver tests) |
+| Test mode (no FPGA) | off | see [Bench testing](#bench-testing-without-a-host) |
+| Debug: skip send / ignore completion | 0 | only for testing the self-healing TX pacing |
 
-## Statuszeile lesen
+## Serial log
 
-Alle 5 s:
+The pipeline logs a status line every 5 s:
 
 ```
-pipeline: state=RUN fill=960.0 ppm=+41.62 in_ppm=+41.74 underrun=0 ovf=0 lost=0 senderr=0 wd=1 tick_us=[9824..10249] mean=10000.0 proc_us_max=5261 sent=14389 heap=114316 bt_ppm=+0.41
+pipeline: state=RUN fill=840.0 ppm=-0.07 in_ppm=-0.87 underrun=0 ovf=0 lost=0 senderr=0 wd=1 tick_us=[9674..10348] mean=10000.0 proc_us_max=2090 sent=11795 heap=99328 bt_ppm=+0.72
+pipeline: i2s bits=0xffffff00
 ```
 
-| Feld | Bedeutung |
+| Field | Meaning |
 |---|---|
-| `state` | `NO_SIGNAL` (kein I2S-Takt) → `PRIME` (FIFO füllt sich) → `RUN`; `RATE_ERROR` = gemessene Eingangsrate weicht mehr als ±600 ppm von 48 kHz ab, z. B. 44,1 kHz (Fehlermeldung mit der gemessenen Rate, nach 5 s neuer Versuch). In `PRIME` wird die Rate 0,5 s lang gemessen, bevor `RUN` beginnt. Außerhalb von `RUN` wird Stille gesendet. Nach einer Taktlücke startet der Regler mit dem zuletzt gelernten Verhältnis (Warmstart). |
-| `fill` | geschätzter FIFO-Füllstand in Frames, Mittel im 5-s-Fenster (Soll 960) |
-| `ppm` | Resampler-Verhältnis − 1 (Mittel im Fenster): Abweichung des I2S-Takts gegenüber dem Bluetooth-Takt |
-| `in_ppm` | gemessene I2S-Eingangsrate gegenüber `esp_timer`, seit Signalbeginn (startet nach jeder Lücke neu) — sollte ≈ `ppm` + `bt_ppm` sein |
-| `underrun` / `ovf` | FIFO leer gelaufen / übergelaufen (jeweils Rückfall nach `PRIME`) |
-| `lost` | Anzahl I2S-Taktverluste im Zustand `RUN` |
-| `senderr` / `wd` | Sendefehler / Watchdog-Nachfüllungen der Controller-Queue (Pacing über Sequenznummern; ein verlorener Bestätigungs-Callback korrigiert sich beim nächsten) |
-| `tick_us` / `mean` | Abstand der SDU-Bestätigungen des Controllers (min..max / Mittel im 5-s-Fenster) |
-| `proc_us_max` | max. Rechenzeit pro SDU-Paar (Resampler + 2 × LC3), Budget 10 000 µs |
-| `sent` | bestätigte SDU-Paare seit Start |
-| `heap` | freier Heap in Byte |
-| `bt_ppm` | Rate der SDU-Ticks gegenüber `esp_timer`, kumulativ seit Streamstart |
+| `state` | input state, see [Operation](#operation) |
+| `fill` | estimated FIFO fill in frames, mean over the window (target = FIFO_TARGET) |
+| `ppm` | resampler ratio − 1: I2S clock against the Bluetooth clock |
+| `in_ppm` | measured I2S input rate against `esp_timer` since the signal appeared; should be ≈ `ppm` + `bt_ppm` |
+| `underrun` / `ovf` | FIFO ran empty / overflowed (each falls back to `PRIME`) |
+| `lost` | I2S clock losses in `RUN` |
+| `senderr` / `wd` | send errors / watchdog refills of the controller queue (one at start-up is normal) |
+| `tick_us` / `mean` | interval of the controller's SDU confirmations, min..max / mean |
+| `proc_us_max` | longest processing time per SDU set (resampler + LC3), budget 10 000 µs |
+| `sent` | confirmed SDU sets since start |
+| `heap` | free heap in bytes |
+| `bt_ppm` | SDU tick rate against `esp_timer`, cumulative |
 
-Darunter steht alle 5 s `i2s bits=0x…`, das ODER aller rohen 32-Bit-Slotwörter im Fenster. Bei 24-Bit-Daten muss
-das untere Byte `00` sein. `…80` bedeutet, dass ein Bit zu früh abgetastet wird (BCLK-Flanke falsch), `…01`,
-dass es ein Bit zu spät ist. Bei einem Sender mit echten 32-Bit-Daten ist die Maske nicht aussagekräftig.
+`i2s bits` is the OR of all raw 32-bit slot words in the window. For 24-bit data the low byte must be `00`. A
+value ending in `80` means DATA is sampled one bit early, which points to the wrong BCLK edge; one ending in `01`
+means one bit late.
 
-## Messwerte
+## Bench testing without a host
 
-| Datum | Was | Ergebnis |
-|---|---|---|
-| 2026-10-17 | Chip | ESP32-S31 Revision v0.0, 40-MHz-Quarz, CPU 320 MHz (App-Log; esptool nennt 300 MHz) |
-| 2026-10-17 | Flash | 16 MB erkannt. PSRAM ist nicht aktiviert (nicht benötigt), Größe ungeprüft |
-| 2026-10-17 | I2S-Slave-Takt | Braucht die APLL: 2×32 Bit bei 48 kHz verlangen intern ≥ 24,576 MHz mit Teiler ≥ 2, XTAL (40 MHz) reicht nicht |
-| 2026-10-17 | Testton 48002 Hz (XTAL, Teiler 3+88/345 → real +41,74 ppm) | gemessen +41,73 … +41,79 ppm, Töne 440,0/880,0 Hz, kein Überlauf |
-| 2026-10-17 | Testton 47998 Hz (XTAL, Teiler 3+12/47 → real −34,04 ppm) | gemessen −34,03 … −34,07 ppm |
-| 2026-10-17 | LC3-Encoder, 2 × mono 48 kHz/10 ms/120 B | 6,0 ms aus Flash (DIO) → 4,6 ms (QIO) → 3,0 ms (Code im IRAM, `main/lc3_iram.lf`); ASM-Variante allein bringt nichts |
-| 2026-10-17 | Broadcast, Synth-Quelle, 70 s | Tick-Mittel 10 000,0 µs, Spanne 9,5–10,6 ms (keine Bündelung), senderr=0, wd=0, Rechenzeit max. 3,2 ms/Paar, Heap frei 224 KB |
-| 2026-10-17 | Selbstheilung (jedes 500. Paar nicht gesendet), 60 s | Ticks unverändert 10 000 µs, kein Stillstand, Queue füllt sich beim nächsten Tick wieder auf |
-| 2026-10-17 | Pipeline-Rechenzeit (Resampler + 2 × LC3) | max. 5,6 ms pro 10 ms (Resampler ~2,2 ms nach Umstellung auf Festkomma-Positionen) |
-| 2026-10-17 | Drift 10 min, Testton real +41,74 ppm | durchgehend `RUN`, Füllstand 959,5–960,6, Regler-Mittel +41,75 ppm (5-s-Fenster 40,0–43,8), alle Fehlerzähler 0, Heap ≥ 111 KB |
-| 2026-10-17 | Drift 2 min, Testton real −34,04 ppm | Regler −32,7 … −35,3 ppm, Füllstand 960, alle Fehlerzähler 0 |
-| 2026-10-17 | Start mit 5 s verspätetem I2S-Takt | Broadcast startet in `NO_SIGNAL`, nach Taktbeginn `PRIME → RUN` |
-| 2026-10-17 | Taktlücken (2 s alle 30 s, 4×) | je `RUN → NO_SIGNAL → PRIME → RUN`, `lost` +1, Warmstart mit gelerntem Verhältnis, Ticks lückenlos, kein Reset |
-| 2026-10-17 | Falsche Rate (real +2081 ppm) | `RATE_ERROR` ~13 s nach `RUN`, zyklischer Wiederanlauf ohne Reset, `in_ppm` zeigt +2081 |
-| 2026-10-17 | Falsche Rate 44,1 kHz (nach Review-Fix) | `RATE_ERROR` 0,5 s nach Signalbeginn mit „44100 Hz“ im Log, kein Abspielen, keine Unterläufe, Wiederholversuch alle 5,5 s |
-| 2026-10-17 | Jeder 500. Bestätigungs-Callback verworfen, 60 s | durchgehend `RUN`, Füllstand 960, `wd` unverändert — Pacing heilt sich über Sequenznummern |
-| 2026-10-19 | Empfang am Linux-PC (BlueZ 5.87 + PipeWire 1.6.2, MediaTek MT7902), Synth-Quelle | Auracast-Ankündigung (0x1852 + ID, 0x1856 HQ, Name) korrekt; BlueZ synchronisiert PA/BASE/BIG und legt 2 Transports an; PipeWire decodiert LC3: links 440,0 Hz, rechts 880,0 Hz, je −15 dBFS RMS, > 72 dB Abstand, keine Aussetzer in 6 s |
-| 2026-10-19 | Betrieb am FPGA (AES67, Musik) | I2S-Takt PTP-gerastet: `in_ppm` −0,7 … +2,5, Regler ±5 ppm um den Sollwert, alle Fehlerzähler 0. Daten erst nach Umstellen auf die fallende BCLK-Flanke sauber (siehe I2S-Format) |
-| 2026-10-19 | Live-Modus 24_2_1 mono, BlueZ | 1 Transport, 24 kHz/10 ms/60 B ohne Channel-Allocation, Location 0, PD 20000, Kontext Live (0x0040); PBA 0x1856 mit Feature SQ (0x02) und Metadaten `01 09` (Immediate Rendering); Rechenzeit max. 1,8 ms pro 10 ms (HQ: 4,9 ms) |
-| 2026-10-19 | Störungsfreiheit (Referenzvergleich mit `measure_latency.py`) | HQ und Live, 9 Aufzeichnungen à 20–60 s: 0 gestörte 10-ms-Blöcke, 0 verlorene SDUs |
-| 2026-10-19 | Kanalzuordnung am FPGA | BIS 1 (angekündigt links) trägt den **rechten** AES67-Kanal, BIS 2 den linken. Ursache offen (WS-Polarität FPGA ↔ ESP?) |
-| 2026-10-19 | I2C-Steuerung am FPGA, ohne I2C-Master | Ohne AUTOSTART: wartet, 30 s Scan findet keinen Broadcast. Mit AUTOSTART: Live 24_2_1 2 min `RUN`, alle Fehlerzähler 0, `i2s bits` …00, Heap 99 KB; 16_2_1 mono `RUN`, vom PC empfangen, Rechenzeit max. 1,8 ms, Heap 67 KB; 16_2_1 stereo `RUN`, 2 BIS, Rechenzeit max. 3,4 ms, Heap 57 KB; 48_4_1 stereo `RUN`, 2 BIS, Heap 117 KB. Die I2C-Strecke selbst ist noch nicht getestet |
-| offen | Hörtest mit Hörgerät / Consumer-Empfänger | z. B. LE-Audio-Kopfhörer (AirPods können kein Auracast) |
+- **AUTOSTART** (Kconfig): broadcasts right after boot with the power-on values (Live 24_2_1 mono). To try another
+  configuration without a host, change the `AURA_DEFAULT_*` values in `auracast_i2c_regs.h` locally. The I2C slave
+  still runs, and its status is still readable.
+- **Synthetic source** (`Audio source → SYNTH`): 440 Hz left, 880 Hz right, generated directly in the encoder task
+  (no I2S, no resampler). Use it to test receivers.
+- **Test tone** (`Test mode → Generate test tone`). **Disconnect the FPGA first**, otherwise two sources drive the
+  same pins.
+  - I2S1 runs as master on the input pins (440/880 Hz, −12 dBFS) and is looped back into I2S0 through the GPIO
+    matrix.
+  - The tone rate is deliberately off 48 kHz to create drift. The XTAL divider is not exact: 48002 Hz is really
+    +41.74 ppm, 47998 Hz −34.04 ppm, and 48100 Hz +2081 ppm (the "wrong rate" case).
+  - Further options delay the tone start, or switch it off for 2 s every 30 s (clock loss and recovery).
+  - In test mode the log adds `tone check (after resampler): L=…Hz R=…Hz`.
 
-### Empfang am Linux-PC nachvollziehen
+## PC tools
 
-Voraussetzungen: BlueZ mit `Experimental = true` und `KernelExperimental = 6fbaf188-05e0-496a-9885-d6ddfdb4e03e`
-in `/etc/bluetooth/main.conf`, Controller mit `sync-receiver` (`btmgmt info`), PipeWire mit LC3.
+All tools are in `tools/`. They run on a Linux PC with BlueZ and PipeWire.
+
+### Listening: `auracast_listen.py`
 
 ```bash
-tools/auracast_listen.py         # abonniert "AES67 Auracast", bis Ctrl-C (--name, --address, --keep-scanning)
+tools/auracast_listen.py          # subscribes to "AES67 Auracast" until Ctrl-C (--name, --address, --keep-scanning)
 ```
 
-Das Skript entfernt ein altes Geräteobjekt (BlueZ synchronisiert nach einem Board-Reset sonst nicht neu), scannt,
-wählt beide BIS aus und abonniert von selbst neu, wenn der Broadcast wegfällt. PipeWire bietet danach je BIS eine
-Quelle `bluez_input.<MAC>…` an, die WirePlumber meist sofort auf die Standard-Lautsprecher legt (`pw-link -d` trennt,
-`pw-record --target …` nimmt auf). Von Hand geht dasselbe mit `bluetoothctl`:
+- **Requirements:** BlueZ with `Experimental = true` and
+  `KernelExperimental = 6fbaf188-05e0-496a-9885-d6ddfdb4e03e` in `/etc/bluetooth/main.conf`, a controller with
+  `sync-receiver` (`btmgmt info`), and PipeWire with LC3.
+- **Behaviour:**
+  - The script removes a stale device object first; without that, BlueZ does not resync after a board reset.
+  - It scans, selects every BIS, and subscribes again when the broadcast disappears.
+  - PipeWire then offers one `bluez_input.*` source per BIS. WirePlumber usually routes it to the default speakers
+    at once: `pw-link -d` disconnects it, `pw-record --target …` records it.
 
-**Bekannter Fehler am PC (PipeWire 1.6.2):** Den Live-Modus (24 kHz) gibt PipeWire zerhackt und metallisch wieder.
-Die Funkdaten sind dabei korrekt: Die per HCI mitgeschnittenen SDUs, mit liblc3 dekodiert, sind lückenlos und
-stimmen mit der AES67-Referenz überein. Gemessen am 2026-10-19 durch blockweisen Vergleich der PipeWire-Quelle mit
-genau diesen SDUs: Live 24 kHz nur 19–30 % korrekte Blöcke mit laufenden Zeitsprüngen; HQ 48 kHz stereo 99,7 %;
-dieselbe Live-Ankündigung mit 48 kHz mono (auch mit Live-QoS RTN 2 / 10 ms) 98 %. Auslöser ist allein die
-Abtastrate 24 kHz im BAP-Empfangspfad von PipeWire, nicht Presentation Delay, Mono, Kontext oder QoS. Zum Hören am PC
-einen 48-kHz-Preset nehmen; für Hörgeräte bleibt 24_2_1 der empfohlene Standard.
-
-```bash
-remove <MAC>                     # nach einem Board-Reset
-scan le                          # findet "AES67 Auracast", legt sid0/bis1 und sid0/bis2 als Transports an
-transport.select /org/bluez/hci0/dev_<MAC>/sid0/bis1/fd0 /org/bluez/hci0/dev_<MAC>/sid0/bis2/fd1
-```
-
-## Latenz (gemessen)
-
-`tools/measure_latency.py` schneidet mit einem `dumpcap` den AES67-Stream (den das FPGA am ESP ausgibt) und den
-Bluetooth-Monitor des PCs auf derselben Uhr mit, dekodiert L24 und LC3 (`liblc3`) und richtet beide per
-Kreuzkorrelation aus. PipeWire ist nicht im Messpfad. Zeitbezug: RTP-Timestamp = Erfassung des ersten Samples;
-das Paket ist 1 ms + 29 µs (Sender) + 12 µs (SG350) später am PC; das FPGA am ESP gibt jedes Sample 96 Samples (2 ms)
-nach der Erfassung als I2S aus.
-
-| Modus | FIFO | I2S-Eingang → SDU am PC | gerendert beim Hörgerät* |
-|---|---|---|---|
-| HQ 48_4_1, PD 40 ms (vorher) | 960 | 37,0 ms (BIS 1) / 40,3 ms (BIS 2) | 80,3 … 86,9 ms |
-| HQ 48_4_1, PD 40 ms | 840 | 34,5 / 37,8 ms | 77,8 … 84,4 ms |
-| Live 24_2_1, PD 20 ms | 960 | 42,8 ms | 62,8 … 64,0 ms |
-| Live 24_2_1, PD 20 ms | 900 | 41,6 ms | 61,6 … 62,7 ms |
-| **Live 24_2_1, PD 20 ms (Default)** | **840** | **40,3 ms** | **60,3 … 61,5 ms** |
-
-\* Untergrenze: Ankunft + Presentation Delay; Obergrenze: zusätzlich die BIG-Transportlatenz aus *BIG Sync
-Established* (HQ 6,6 ms, Live 1,2 ms). Mit Immediate Rendering dürfen Hörgeräte früher rendern
-(gerätespezifisch). Ab AES67-Erfassung kommen jeweils 2 ms dazu. Zwei Läufe je Einstellung lagen ≤ 0,1 ms auseinander.
-
-Die Strecke bis zur Ankunft enthält: FIFO-Sollwert (17,5–20 ms), LC3-Frame 10 ms, LC3-Algorithmus 2,5 ms, Resampler
-0,7 ms (Live 1,3 ms) und die Wartezeit in der Sende-Queue (2 SDUs, Takt der Sende-Bestätigungen). Im Live-Modus ist
-das Funkereignis kürzer, die Bestätigung kommt früher nach dem Anker und die nächste SDU wartet länger. Deshalb ist
-die Ankunft dort trotz kürzerer Transportlatenz später als bei HQ; gerendert ist Live wegen 20 statt 40 ms
-Presentation Delay trotzdem ~20 ms schneller.
+### Latency: `measure_latency.py`
 
 ```bash
 /usr/bin/python3 tools/measure_latency.py --subscribe --seconds 20 --pd-us 20000 --fifo-frames 840
-/usr/bin/python3 tools/measure_latency.py --pcap capture.pcapng --pd-us 20000    # vorhandenen Mitschnitt auswerten
-/usr/bin/python3 -m unittest discover -s tools -p 'test_*.py'                    # Tests der PC-Werkzeuge
+/usr/bin/python3 tools/measure_latency.py --pcap capture.pcapng --pd-us 20000      # evaluate an existing capture
 ```
 
-Voraussetzungen: `dumpcap` mit Capabilities (Gruppe `wireshark`), `liblc3.so.1`, numpy, der PC im AES67-Netz
-(`--iface`, `--group`). `--subscribe` startet `auracast_listen.py` innerhalb des Mitschnitts, damit auch *BIG Sync
-Established* (Transportlatenz) darin landet; dabei läuft das Audio über die Standard-Lautsprecher. Das Tool meldet je
-BIS außerdem, welchen AES67-Kanal es trägt, verlorene SDUs/Pakete und gestörte 10-ms-Blöcke. Gestört heißt: ein
-1-ms-Abschnitt mit SNR < 1 dB, der mindestens 6 dB mehr Fehler hat als liblc3 auf derselben Referenz; Stellen, die
-für LC3 bei dieser Bitrate einfach schwer sind, zählen so nicht, ebenso wenig vom PC verdeckte Verluste. Die Latenz
-wird in 2–6 Fenstern bestimmt (Median, Warnung bei > 0,5 ms Spanne). Stille oder rein periodischer Inhalt ergibt
-„mehrdeutig“ statt einer Zahl, ein stummer BIS wird gemeldet, ein Neustart von Board oder AES67-Sender ebenso (dann
-zählt das längste Segment). Defaults `--pd-us 20000 --fifo-frames 840` entsprechen den Werten nach dem Boot
-(Live-Modus); zum Messen ohne I2C-Master die Firmware mit AUTOSTART bauen.
+**How it works:**
+- One `dumpcap` captures both the AES67 multicast and the PC's Bluetooth monitor, so both sides share the PC clock.
+- It decodes L24 and LC3 (with `liblc3`) and aligns the two signals by cross-correlation. PipeWire is not in the
+  measurement path.
+- **Time reference:**
+  - The RTP timestamp marks the capture of the first sample.
+  - The packet reaches the PC 1 ms + 29 µs (sender) + 12 µs (switch) later.
+  - The FPGA at the ESP outputs each sample on I2S 96 samples (2 ms) after capture.
 
-`tools/sine_check.py aufnahme.wav` prüft eine Aufnahme mit 440-Hz-Sinus blockweise (für Tests mit Sinus statt
-Musik).
+**What it reports for each BIS:**
+- which AES67 channel the BIS carries;
+- the latency, measured in 2–6 windows: the median, with a warning if the spread exceeds 0.5 ms;
+- lost SDUs and lost packets;
+- disturbed 10 ms blocks. A block counts as disturbed when one of its 1 ms sections has an SNR below 1 dB and at
+  least 6 dB more error than `liblc3` on the same reference.
+
+**Special cases:**
+- Silence or purely periodic content gives "ambiguous" instead of a number.
+- A silent BIS, or a restart of the board or the AES67 sender, is reported; the longest segment is then used.
+
+**Requirements:**
+- `dumpcap` with capabilities (group `wireshark`), `liblc3.so.1` and numpy;
+- the PC in the AES67 network (`--iface`, `--group`; the AES67 daemon must be running so the multicast reaches the
+  interface);
+- without a host, firmware built with AUTOSTART.
+
+`--subscribe` starts `auracast_listen.py` inside the capture, so *BIG Sync Established* (the transport latency) is
+recorded too. The audio then plays on the default speakers.
+
+### Other tools
+
+- `serial_log.py --port PORT --seconds N [--reset]`: serial log through the CP2102N.
+- `sine_check.py recording.wav`: checks a recording of a 440 Hz sine block by block.
+- Tests: `/usr/bin/python3 -m unittest discover -s tools -p 'test_*.py'`.
+
+## Latency
+
+Measured with `measure_latency.py` on 2026-10-19, FPGA input with music:
+
+| Configuration | FIFO | I2S input → SDU at the PC | Rendered at the receiver* |
+|---|---|---|---|
+| 48_4_1 stereo, Media, PD 40 ms | 960 | 37.0 ms (BIS 1) / 40.3 ms (BIS 2) | 80.3 … 86.9 ms |
+| 48_4_1 stereo, Media, PD 40 ms | 840 | 34.5 / 37.8 ms | 77.8 … 84.4 ms |
+| 24_2_1 mono, Live, PD 20 ms | 960 | 42.8 ms | 62.8 … 64.0 ms |
+| 24_2_1 mono, Live, PD 20 ms | 900 | 41.6 ms | 61.6 … 62.7 ms |
+| **24_2_1 mono, Live, PD 20 ms (default)** | **840** | **40.3 ms** | **60.3 … 61.5 ms** |
+
+\* **How the range is computed:**
+- The lower bound is arrival + presentation delay.
+- The upper bound adds the BIG transport latency from *BIG Sync Established*: 6.6 ms for 48_4_1, 1.2 ms for 24_2_1.
+- With the Immediate Rendering flag, receivers may render earlier; how much earlier depends on the device.
+- Add 2 ms to get the latency from AES67 capture instead of from the I2S input.
+- Two runs per setting agreed within 0.1 ms.
+
+**Where the time goes, up to the arrival:**
+- FIFO set point: 17.5–20 ms
+- LC3 frame: 10 ms
+- LC3 algorithmic delay: 2.5 ms
+- resampler: 0.7 ms (1.3 ms at 24 kHz)
+- waiting in the controller TX queue: 2 SDUs
+
+The 24 kHz configuration arrives later than 48 kHz despite its shorter transport latency. Its radio event is
+shorter, so the confirmation comes earlier after the anchor point and the next SDU waits longer in the queue. It is
+still about 20 ms faster to playback because of the 20 ms presentation delay. 840 frames is the smallest FIFO set
+point that runs without underruns, given the block and DMA granularity.
+
+## Known issues and limitations
+
+- **I2C path: first host bring-up done (Zephyr on ESP32-S3, 2026-10-20).** The S31 answers its address and the
+  register file is reachable. Found and fixed on the bench: a register-less read after a short read left bytes in
+  the TX FIFO, the next fill overflowed into the driver's ring buffer, and from then on every `write_read` returned
+  stale register contents. The TX FIFO is now reset right before every fill (`handle_request`), so the ring buffer
+  is never used.
+  - **Bring-up check:** do a short read, then `write_read` one byte at 0x08. It must return STATE, not
+    leftover bytes.
+- **Reads must take exactly 31 bytes.** A shorter read leaves data in the TX FIFO, and the slave hardware pre-loads
+  the next byte into its shift register. `i2c_slave_reset_tx_fifo()` (FIFO + FSM reset) would clear it, but the
+  IDF allows that only after a completed read, for which the slave gets no callback; the plain FIFO reset the
+  firmware does before every fill and at every write does not reach the shift register. Seen on the bench
+  (2026-10-20): after one 1-byte read every `write_read` returned one stale byte in front of the real data, for
+  good. Reading the full 31 bytes drains the FIFO, so nothing is pre-loaded; a 32-byte read recovers a shifted
+  slave once.
+- **PipeWire 1.6.2 plays 24 kHz broadcasts choppy and metallic** (19–30 % correct blocks). The radio data is
+  correct: the SDUs captured over HCI and decoded with liblc3 are complete and match the AES67 reference. 48 kHz
+  plays cleanly (98–99.7 %), including 48 kHz mono with Live QoS. To listen on a PC, use a 48 kHz preset; for hearing
+  aids, 24_2_1 remains the recommended setting.
+- **Channel swap at the FPGA:** in stereo, BIS 1 (announced as left) carries the **right** AES67 channel. The cause
+  is open; WS polarity between FPGA and ESP is suspected.
+- **Free heap depends on the preset**, because the resampler's filter table grows with the decimation factor:
+  117 KB at 48 kHz stereo, 99 KB at 24 kHz mono, 57 KB at 16 kHz stereo.
+- **Board:** the ES8311 codec occupies I2S pins 52–56, so the FPGA connects through J2 and the GPIO matrix. Avoid
+  the strapping pins 36/37/60/61.
+- **No real hearing aid tested yet.** AirPods cannot receive Auracast.
+
+## Repository layout and tests
+
+```
+main/
+  main.c            boot, waits for START, starts pipeline and broadcast
+  ctrl_i2c.c        I2C slave front end (ISR → queue → task), status refresh
+  broadcast.c       BAP broadcast source, PBP announcement, presets, TX pacing
+  adv_bluedroid.c   extended + periodic advertising (Bluedroid)
+  pipeline.c        encoder task: I2S FIFO → drift control → resampler → LC3
+  i2s_in.c          I2S slave input (DMA → SPSC ring)
+  test_tone.c       I2S1 test-tone master for bench tests
+components/
+  audio_dsp/        resampler, drift controller, rate check, SPSC ring, TX pacing (pure C, host-testable)
+  ctrl_regs/        I2C register file and protocol header (pure C, host-testable)
+tools/              PC tools (listening, latency measurement, logs) and their tests
+```
+
+Host tests (Linux, gcc):
+
+```bash
+cmake -S components/audio_dsp/host_test -B build_host && cmake --build build_host && ctest --test-dir build_host
+cmake -S components/ctrl_regs/host_test -B build_host_ctrl && cmake --build build_host_ctrl && ctest --test-dir build_host_ctrl
+/usr/bin/python3 -m unittest discover -s tools -p 'test_*.py'
+```
+
+## Verification log
+
+| Date | What | Result |
+|---|---|---|
+| 2026-10-17 | Chip | ESP32-S31 rev v0.0, 40 MHz crystal, CPU 320 MHz, 16 MB flash (PSRAM not used) |
+| 2026-10-17 | I2S slave clock | needs the APLL: 2 × 32 bit at 48 kHz requires ≥ 24.576 MHz with divider ≥ 2; the 40 MHz XTAL is not enough |
+| 2026-10-17 | LC3 encoder, 2 × mono 48 kHz / 120 B | 6.0 ms per frame pair from flash (DIO), 4.6 ms (QIO), 3.0 ms with the code in IRAM (`main/lc3_iram.lf`) |
+| 2026-10-17 | Drift, test tone at +41.74 ppm, 10 min | always `RUN`, controller mean +41.75 ppm, all error counters 0 |
+| 2026-10-17 | Drift, test tone at −34.04 ppm, 2 min | controller −32.7 … −35.3 ppm, all error counters 0 |
+| 2026-10-17 | Late I2S clock, clock gaps (2 s every 30 s) | starts in `NO_SIGNAL`; each gap `RUN → NO_SIGNAL → PRIME → RUN` with warm start, no reset |
+| 2026-10-17 | Wrong rate (+2081 ppm, 44.1 kHz) | `RATE_ERROR` with the measured rate in the log, nothing played, retry every 5.5 s |
+| 2026-10-17 | Every 500th completion callback dropped, 60 s | always `RUN`, pacing recovers through sequence numbers |
+| 2026-10-19 | Reception on a Linux PC (BlueZ 5.87, PipeWire 1.6.2, MediaTek MT7902) | announcement, PA/BASE/BIG sync and LC3 decode correct; synth tones 440.0 / 880.0 Hz, > 72 dB separation |
+| 2026-10-19 | FPGA input (AES67, music) | PTP-locked: `in_ppm` −0.7 … +2.5, controller ±5 ppm, all error counters 0 (after switching to the falling BCLK edge) |
+| 2026-10-19 | Live mode 24_2_1 mono | 1 BIS without channel allocation, context Live, PBA with SQ and Immediate Rendering metadata; processing max. 1.8 ms per 10 ms (48_4_1 stereo: 4.9 ms) |
+| 2026-10-19 | Glitch check against the AES67 reference | 48_4_1 and 24_2_1, 9 recordings of 20–60 s: 0 disturbed blocks, 0 lost SDUs |
+| 2026-10-19 | I2C control firmware at the FPGA, no host | without AUTOSTART: waits, a 30 s scan finds no broadcast. With AUTOSTART: 24_2_1 mono 2 min `RUN` with all counters 0; 16_2_1 mono and stereo, 48_4_1 stereo `RUN` |
+| open | Hearing aid / consumer LE Audio receiver | — |
+| open | I2C control with the Zephyr host | — |

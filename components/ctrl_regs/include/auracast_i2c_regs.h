@@ -9,8 +9,10 @@
  *   Read:  [reg], repeated start, read N bytes    e.g. i2c_write_read()
  * The S31 stretches SCL at the start of a read until the data is ready (typically well below 1 ms):
  * the master must allow clock stretching. Reading an address without a register returns 0x00.
- * A read returns at most AURA_READ_MAX bytes (longer fields, e.g. NAME or the status block, take two
- * reads) and must always be preceded by a register address write (write_read).
+ * A read must take exactly AURA_READ_MAX bytes (longer fields, e.g. NAME or the status block, take two
+ * reads) and must always be preceded by a register address write (write_read). A shorter read leaves one
+ * byte pre-loaded in the slave's shift register, which then prefixes every later read; a read of
+ * AURA_READ_MAX + 1 bytes drains it.
  *
  * Life cycle:
  *   boot -> WAIT_CONFIG: nothing is broadcast; the master writes the configuration registers
@@ -28,7 +30,7 @@
 
 #define AURA_I2C_DEFAULT_ADDR      0x3A
 #define AURA_PROTO_VERSION         1
-#define AURA_READ_MAX              31      /* bytes per read transaction (one hardware FIFO fill) */
+#define AURA_READ_MAX              31      /* bytes per read transaction, exactly (one hardware FIFO fill) */
 
 /* ---- Identification and control ---------------------------------------- */
 #define AURA_REG_MAGIC             0x00    /* R  4  'A','U','R','A' */
