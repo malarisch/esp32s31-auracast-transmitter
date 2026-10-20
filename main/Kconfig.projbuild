@@ -64,6 +64,13 @@ menu "AES67 Auracast bridge"
             default 0
             help
                 0 mono (L+R)/2, 1 stereo (2 BIS), 2 mono left, 3 mono right.
+        config AURACAST_AUTOSTART_HQ_CHANNELS
+            int "AUTOSTART: channel mode of the HQ subgroup (register 0x51)"
+            depends on AURACAST_AUTOSTART
+            range 0 3
+            default 1
+            help
+                0 mono (L+R)/2, 1 stereo (2 BIS), 2 mono left, 3 mono right.
     endmenu
 
     choice AURACAST_SOURCE

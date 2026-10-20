@@ -250,12 +250,12 @@ esp_err_t ctrl_i2c_start(void)
              CONFIG_AURACAST_I2C_SDA_GPIO, CONFIG_AURACAST_I2C_SCL_GPIO, FW_VERSION[0], FW_VERSION[1], FW_VERSION[2],
              AURA_PROTO_VERSION);
 #if CONFIG_AURACAST_AUTOSTART
-    ESP_LOGW(TAG, "AUTOSTART: starting with the power-on configuration (channels %d, HQ preset %d)",
-             CONFIG_AURACAST_AUTOSTART_CHANNELS, CONFIG_AURACAST_AUTOSTART_HQ_PRESET);
+    ESP_LOGW(TAG, "AUTOSTART: starting with the power-on configuration (channels %d, HQ preset %d, HQ channels %d)",
+             CONFIG_AURACAST_AUTOSTART_CHANNELS, CONFIG_AURACAST_AUTOSTART_HQ_PRESET, CONFIG_AURACAST_AUTOSTART_HQ_CHANNELS);
     xSemaphoreTake(s_lock, portMAX_DELAY);
     /* As an I2C master would: register address, then the value */
     const uint8_t ch[2] = {AURA_REG_CHANNELS, CONFIG_AURACAST_AUTOSTART_CHANNELS};
-    const uint8_t hq[2] = {AURA_REG_HQ_PRESET, CONFIG_AURACAST_AUTOSTART_HQ_PRESET};
+    const uint8_t hq[3] = {AURA_REG_HQ_PRESET, CONFIG_AURACAST_AUTOSTART_HQ_PRESET, CONFIG_AURACAST_AUTOSTART_HQ_CHANNELS};
     ctrl_regs_write(&s_regs, ch, sizeof(ch));
     ctrl_regs_write(&s_regs, hq, sizeof(hq));
     handle_start();

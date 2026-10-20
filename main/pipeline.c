@@ -90,6 +90,8 @@ typedef struct {
     uint32_t proc_us_max;
     uint64_t proc_us_sum;
     uint32_t proc_n;
+    uint32_t pcm_peak[BROADCAST_MAX_BIS];   /* largest |sample| fed to each encoder */
+    uint32_t zero_sdus;                     /* SDUs sent whose bytes were all zero (LC3 silence) */
 } window_stats_t;
 
 static portMUX_TYPE s_win_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -633,6 +635,26 @@ static void produce_frame(void)
     if (!ok) {
         ESP_LOGE(TAG, "LC3 encode failed");
     }
+    uint32_t peak[BROADCAST_MAX_BIS] = {0};
+    uint32_t zero = 0;
+    for (int i = 0; i < s_nbis; i++) {
+        for (uint32_t k = 0; k < s_bis[i].out_frames; k++) {
+            const int32_t v = s_bis[i].pcm[k];
+            const uint32_t a = v < 0 ? (uint32_t)(-(int64_t)v) : (uint32_t)v;
+            peak[i] = a > peak[i] ? a : peak[i];
+        }
+        bool nonzero = false;
+        for (uint32_t k = 0; k < s_bis[i].sdu_len && !nonzero; k++) {
+            nonzero = s_bis[i].sdu[k] != 0;
+        }
+        zero += !nonzero;
+    }
+    portENTER_CRITICAL(&s_win_lock);
+    for (int i = 0; i < s_nbis; i++) {
+        s_win.pcm_peak[i] = peak[i] > s_win.pcm_peak[i] ? peak[i] : s_win.pcm_peak[i];
+    }
+    s_win.zero_sdus += zero;
+    portEXIT_CRITICAL(&s_win_lock);
 #if CONFIG_AURACAST_DEBUG_SKIP_SEND_EVERY > 0
     if (s_frames_made % CONFIG_AURACAST_DEBUG_SKIP_SEND_EVERY == 0) {
         return;
@@ -675,6 +697,9 @@ static void stats_task(void *arg)
                  (unsigned long)st.tick_us_min, (unsigned long)st.tick_us_max, st.tick_us_mean,
                  (unsigned long)w.proc_us_max, (unsigned long)(w.proc_n ? w.proc_us_sum / w.proc_n : 0),
                  (unsigned long)st.sent, (unsigned long)esp_get_free_heap_size(), st.bt_ppm);
+        ESP_LOGI(TAG, "zero_sdus=%lu pcm peak dBFS: %.1f %.1f %.1f %.1f", (unsigned long)w.zero_sdus,
+                 20.0 * log10((double)w.pcm_peak[0] / 2147483648.0 + 1e-12), 20.0 * log10((double)w.pcm_peak[1] / 2147483648.0 + 1e-12),
+                 20.0 * log10((double)w.pcm_peak[2] / 2147483648.0 + 1e-12), 20.0 * log10((double)w.pcm_peak[3] / 2147483648.0 + 1e-12));
 #if CONFIG_AURACAST_SOURCE_I2S
         ESP_LOGI(TAG, "i2s bits=0x%08lx", (unsigned long)bits_take(BITS_LOG));
 #endif

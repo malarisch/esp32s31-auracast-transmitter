@@ -2,6 +2,7 @@ docs/**
 build/
 build_host/
 build_host_ctrl/
+build_host_dsp/
 sdkconfig
 sdkconfig.old
 managed_components/

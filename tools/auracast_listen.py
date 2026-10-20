@@ -11,6 +11,7 @@ Requires: BlueZ with LE Audio enabled (see README), PipeWire with LC3, python3-d
   tools/auracast_listen.py                        # broadcast name "AES67 Auracast"
   tools/auracast_listen.py --name "Other Name"
   tools/auracast_listen.py --address 1C:29:04:D0:77:CD
+  tools/auracast_listen.py --bis 1               # only BIS 1 (e.g. the Standard Quality subgroup)
 """
 
 import argparse
@@ -46,17 +47,26 @@ def bis(path):
     return "/".join(str(path).split("/")[-3:-1])  # .../sid0/bis1/fd0 -> sid0/bis1
 
 
+def filter_bis(paths, spec):
+    """Keep the transports whose BIS number (…/bisN/fd0) is in the comma-separated spec; None = all."""
+    if spec is None:
+        return list(paths)
+    wanted = {int(x) for x in spec.split(",") if x.strip()}
+    return [p for p in paths if int(bis(p).split("bis")[-1]) in wanted]
+
+
 def log(msg):
     print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
 
 
 class Listener:
-    def __init__(self, bus, adapter_path, name, address, keep_scanning):
+    def __init__(self, bus, adapter_path, name, address, keep_scanning, bis_spec=None):
         self.bus = bus
         self.adapter_path = adapter_path
         self.name = name
         self.address = address.upper() if address else None
         self.keep_scanning = keep_scanning
+        self.bis_spec = bis_spec
         self.adapter = dbus.Interface(bus.get_object(BLUEZ, adapter_path), ADAPTER_IF)
         self.device_path = None
         self.transports = {}  # path -> state
@@ -200,8 +210,9 @@ class Listener:
 
     def select(self):
         self.select_timer = None
-        paths = sorted(self.transports)
+        paths = filter_bis(sorted(self.transports), self.bis_spec)
         if not paths:
+            log(f"no transport matches --bis {self.bis_spec}" if self.bis_spec else "no transports")
             return False
         tr = lambda p: self.bus.get_object(BLUEZ, p)
         # Same as `transport.select A B ...` in bluetoothctl: link all BIS to the first one, then select.
@@ -241,11 +252,12 @@ def main():
     ap.add_argument("--adapter", default="hci0")
     ap.add_argument("--keep-scanning", action="store_true",
                     help="keep LE discovery running while receiving (default: stop once audio flows)")
+    ap.add_argument("--bis", help="comma-separated BIS numbers to select, e.g. 1,2 (default: all)")
     args = ap.parse_args()
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
-    listener = Listener(bus, f"/org/bluez/{args.adapter}", args.name, args.address, args.keep_scanning)
+    listener = Listener(bus, f"/org/bluez/{args.adapter}", args.name, args.address, args.keep_scanning, args.bis)
 
     if not listener.check_sink_endpoint():
         sys.exit("no broadcast sink endpoint registered (BlueZ Experimental/KernelExperimental set? "

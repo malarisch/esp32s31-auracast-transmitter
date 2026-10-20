@@ -40,6 +40,9 @@ AES67 ──► FPGA ──I2S (48 kHz, PTP clock)──► ESP32-S31 ──LE A
 - **LC3 presets** (all 10 ms frames): 16_2_1 and 24_2_1 (Standard Quality, receivable by hearing aids), and
   48_2_1 / 48_4_1 / 48_6_1 (High Quality).
 - **Channel modes:** one mono BIS carrying (L+R)/2, left only or right only; or two BIS (front left / front right).
+- **Two subgroups in one BIG (optional):** a Standard Quality subgroup for hearing aids plus a 48 kHz High
+  Quality subgroup for headphones, up to 4 BIS. The Public Broadcast Announcement then advertises SQ and HQ, and
+  every receiver picks the subgroup it can decode.
 - **Runtime configuration over I2C:** preset, channel mode, streaming context, Immediate Rendering flag,
   presentation delay, TX power, FIFO set point, Broadcast_ID, name and code. A status block is readable over I2C.
 - **Low-latency defaults for hearing aids:** 24_2_1 mono, *Live* context, Immediate Rendering flag, 20 ms
@@ -150,7 +153,7 @@ Power-on values are in **bold**.
 | Addr | Register | Size | Access | Content |
 |---|---|---|---|---|
 | 0x00 | MAGIC | 4 | R | `'A' 'U' 'R' 'A'` |
-| 0x04 | PROTO_VERSION | 1 | R | 1 |
+| 0x04 | PROTO_VERSION | 1 | R | 2 (protocol 1 plus the HQ registers 0x50…0x53) |
 | 0x05 | FW_VERSION | 3 | R | major, minor, patch |
 | 0x08 | STATE | 1 | R | 0 WAIT_CONFIG, 1 STARTING, 2 STREAMING, 3 CONFIG_ERROR, 4 FAULT |
 | 0x09 | ERROR | 1 | R | 0 NONE, 1 READ_ONLY, 2 LOCKED, 3 BAD_VALUE, 4 BAD_COMMAND, 5 START_FAILED |
@@ -167,6 +170,9 @@ Power-on values are in **bold**.
 | 0x1A | BROADCAST_ID | 4 | RW | 0…0xFFFFFF, or **0xFFFFFFFF = random** at every start |
 | 0x20 | NAME | 32 | RW | Broadcast_Name, UTF-8, 4…32 bytes, padded with 0x00 (**`AES67 Auracast`**) |
 | 0x40 | CODE | 16 | RW | Broadcast_Code, 0…16 bytes, padded with 0x00; **empty = unencrypted** |
+| 0x50 | HQ_PRESET | 1 | RW | second subgroup (High Quality): 2 48_2_1, 3 48_4_1, 4 48_6_1, **0xFF = none**; requires PRESET = 16_2_1 or 24_2_1 |
+| 0x51 | HQ_CHANNELS | 1 | RW | channel mode of the HQ subgroup, values as CHANNELS (**1 stereo**) |
+| 0x52 | HQ_CONTEXT | 2 | RW | streaming context of the HQ subgroup (**0x0004 Media**) |
 | 0x80 | Status block | 44 | R | see below, refreshed every 500 ms |
 
 Configuration registers are writable in `WAIT_CONFIG` and `CONFIG_ERROR`; afterwards writes are ignored with
@@ -174,6 +180,13 @@ Configuration registers are writable in `WAIT_CONFIG` and `CONFIG_ERROR`; afterw
 
 At START the S31 checks every range above and requires a name of at least 4 bytes. A value the Bluetooth stack
 still refuses leads to `FAULT` / `START_FAILED`; only RESET helps.
+
+**Two subgroups.** With `HQ_PRESET` set, the BIG carries subgroup 0 (PRESET / CHANNELS / CONTEXT, Standard
+Quality) followed by subgroup 1 (the HQ registers); BIS 0 … n belong to the SQ subgroup, the HQ BIS follow. All
+BIS of a BIG share one QoS: SDU interval 10 ms, the larger SDU size, the longer transport latency (20 ms) and the
+presentation delay `PD_US`. Every sub-event is sized for the larger PDU, so the retransmission count is reduced
+until the BIG fits the ISO interval (see [Known issues](#known-issues-and-limitations)). A master that never
+writes 0x50 gets exactly the protocol 1 behaviour.
 
 ### Status block
 
@@ -213,6 +226,10 @@ i2c_burst_write(bus, addr, AURA_REG_CHANNELS, &channels, 1);
 i2c_burst_write(bus, addr, AURA_REG_CONTEXT, ctx, sizeof(ctx));
 i2c_burst_write(bus, addr, AURA_REG_NAME, name, sizeof(name));
 
+/* Optional: add a 48 kHz stereo subgroup for headphones next to a 24_2_1 mono subgroup for hearing aids */
+uint8_t hq[4] = {AURA_PRESET_48_4_1, AURA_CH_STEREO, 0x04, 0x00};    /* HQ_PRESET, HQ_CHANNELS, HQ_CONTEXT */
+i2c_burst_write(bus, addr, AURA_REG_HQ_PRESET, hq, sizeof(hq));
+
 uint8_t cmd = AURA_CMD_START;
 i2c_burst_write(bus, addr, AURA_REG_COMMAND, &cmd, 1);
 i2c_burst_read(bus, addr, AURA_REG_STATE, &state, 1);                 /* STARTING, later STREAMING */
@@ -231,6 +248,7 @@ holds what depends on the board.
 | I2C control → slave address | 0x3A | 7-bit |
 | I2C control → SDA / SCL GPIO | 43 / 44 | pins on J2 |
 | I2C control → AUTOSTART | off | broadcast right after boot with the power-on values, without a host (bench use) |
+| AUTOSTART: channel mode / HQ preset / HQ channels | 0 / 255 / 1 | written into registers 0x11, 0x50 and 0x51 before the automatic START |
 | Audio source | I2S | `SYNTH`: 440/880 Hz generated internally, no I2S (receiver tests) |
 | Test mode (no FPGA) | off | see [Bench testing](#bench-testing-without-a-host) |
 | Debug: skip send / ignore completion | 0 | only for testing the self-healing TX pacing |
@@ -240,7 +258,8 @@ holds what depends on the board.
 The pipeline logs a status line every 5 s:
 
 ```
-pipeline: state=RUN fill=840.0 ppm=-0.07 in_ppm=-0.87 underrun=0 ovf=0 lost=0 senderr=0 wd=1 tick_us=[9674..10348] mean=10000.0 proc_us_max=2090 sent=11795 heap=99328 bt_ppm=+0.72
+pipeline: state=RUN fill=840.0 ppm=-0.07 in_ppm=-0.87 underrun=0 ovf=0 lost=0 senderr=0 wd=1 tick_us=[9674..10348] mean=10000.0 proc_us_max=2090 proc_us_mean=1850 sent=11795 heap=99328 bt_ppm=+0.72
+pipeline: zero_sdus=0 pcm peak dBFS: -15.1 -14.3 -240.0 -240.0
 pipeline: i2s bits=0xffffff00
 ```
 
@@ -254,20 +273,22 @@ pipeline: i2s bits=0xffffff00
 | `lost` | I2S clock losses in `RUN` |
 | `senderr` / `wd` | send errors / watchdog refills of the controller queue (one at start-up is normal) |
 | `tick_us` / `mean` | interval of the controller's SDU confirmations, min..max / mean |
-| `proc_us_max` | longest processing time per SDU set (resampler + LC3), budget 10 000 µs |
+| `proc_us_max` / `proc_us_mean` | longest / mean processing time per SDU set (resampler + LC3), budget 10 000 µs |
 | `sent` | confirmed SDU sets since start |
 | `heap` | free heap in bytes |
 | `bt_ppm` | SDU tick rate against `esp_timer`, cumulative |
 
-`i2s bits` is the OR of all raw 32-bit slot words in the window. For 24-bit data the low byte must be `00`. A
+`zero_sdus` counts SDUs sent as all-zero bytes (LC3 silence) in the window, `pcm peak` is the peak level fed to
+each of the up to four encoders (−240 = unused BIS). `i2s bits` is the OR of all raw 32-bit slot words in the window. For 24-bit data the low byte must be `00`. A
 value ending in `80` means DATA is sampled one bit early, which points to the wrong BCLK edge; one ending in `01`
 means one bit late.
 
 ## Bench testing without a host
 
-- **AUTOSTART** (Kconfig): broadcasts right after boot with the power-on values (Live 24_2_1 mono). To try another
-  configuration without a host, change the `AURA_DEFAULT_*` values in `auracast_i2c_regs.h` locally. The I2C slave
-  still runs, and its status is still readable.
+- **AUTOSTART** (Kconfig): broadcasts right after boot with the power-on values (Live 24_2_1 mono). The channel
+  mode, the HQ preset and the HQ channel mode can be set next to it (registers 0x11, 0x50, 0x51), so a two-subgroup
+  broadcast runs without a host; for anything else change the `AURA_DEFAULT_*` values in `auracast_i2c_regs.h`
+  locally. The I2C slave still runs, and its status is still readable.
 - **Synthetic source** (`Audio source → SYNTH`): 440 Hz left, 880 Hz right, generated directly in the encoder task
   (no I2S, no resampler). Use it to test receivers.
 - **Test tone** (`Test mode → Generate test tone`). **Disconnect the FPGA first**, otherwise two sources drive the
@@ -336,6 +357,8 @@ recorded too. The audio then plays on the default speakers.
 
 ### Other tools
 
+- `auracast_listen.py --bis 1`: select only some BIS of the BIG (comma-separated BIS numbers), e.g. one
+  subgroup; by default every BIS is selected and PipeWire gets one source per BIS.
 - `serial_log.py --port PORT --seconds N [--reset]`: serial log through the CP2102N.
 - `sine_check.py recording.wav`: checks a recording of a 440 Hz sine block by block.
 - Tests: `/usr/bin/python3 -m unittest discover -s tools -p 'test_*.py'`.
@@ -351,6 +374,20 @@ Measured with `measure_latency.py` on 2026-10-19, FPGA input with music:
 | 24_2_1 mono, Live, PD 20 ms | 960 | 42.8 ms | 62.8 … 64.0 ms |
 | 24_2_1 mono, Live, PD 20 ms | 900 | 41.6 ms | 61.6 … 62.7 ms |
 | **24_2_1 mono, Live, PD 20 ms (default)** | **840** | **40.3 ms** | **60.3 … 61.5 ms** |
+
+Two subgroups (2026-10-20, FIFO 840, PD 20 ms, SQ Live + HQ Media; BIS in BIG order):
+
+| Configuration | BIS | I2S input → SDU at the PC | Rendered at the receiver* |
+|---|---|---|---|
+| 24_2_1 mono + 48_6_1 stereo | 3 | 35.3 ms (SQ) / 36.8, 39.2 ms (HQ) | 55.3 … 65.6 ms |
+| 24_2_1 stereo + 48_6_1 stereo | 4 | 36.1, 37.7 ms (SQ) / 38.4, 40.0 ms (HQ) | 56.1 … 66.4 ms |
+| 24_2_1 stereo + 48_4_1 stereo | 4 | 34.5, 36.5 ms (SQ) / 37.5, 39.5 ms (HQ) | 54.5 … 65.9 ms |
+| 24_2_1 mono alone, regression | 1 | 40.7 ms | 60.7 … 61.8 ms |
+
+With two subgroups the SQ BIS arrive *earlier* than in the single 24_2_1 configuration: the drift-corrected
+signal stays at 48 kHz (64-tap resampler, 0.7 ms) and the SQ path adds a 128-tap FIR decimator (1.3 ms), which
+together is less than the single configuration's 128-tap decimating resampler plus its longer wait in the
+controller queue (see below). The BIG transport latency is that of the larger PDU (6.4 ms).
 
 \* **How the range is computed:**
 - The lower bound is arrival + presentation delay.
@@ -394,7 +431,26 @@ point that runs without underruns, given the block and DMA granularity.
 - **Channel swap at the FPGA:** in stereo, BIS 1 (announced as left) carries the **right** AES67 channel. The cause
   is open; WS polarity between FPGA and ESP is suspected.
 - **Free heap depends on the preset**, because the resampler's filter table grows with the decimation factor:
-  117 KB at 48 kHz stereo, 99 KB at 24 kHz mono, 57 KB at 16 kHz stereo.
+  117 KB at 48 kHz stereo, 99 KB at 24 kHz mono, 57 KB at 16 kHz stereo. With two subgroups the resampler runs at
+  48 kHz (32 KB table) and each extra LC3 encoder costs 6–9 KB: 95 KB free with 3 BIS, 86 KB with 4 BIS.
+- **Two subgroups share one BIG QoS, and airtime limits the retransmissions.** Every sub-event of the BIG is sized
+  for the larger PDU, also for the 60-byte SQ BIS. The controller rejects a BIG that does not fit the 10 ms ISO
+  interval (`BT_HCI: opcode=0x2068, status= 11: Unsupported Value`, state `FAULT`), so the firmware reduces the RTN
+  with an airtime model (`components/audio_dsp/big_airtime.c`, budget 8.5 ms): 3 BIS with 48_6_1 get RTN 2,
+  4 BIS with 48_4_1 RTN 2, 4 BIS with 48_6_1 RTN 1. The SQ BIS get the same RTN as the HQ BIS, so with a
+  stereo SQ subgroup and 48_6_1 the hearing-aid stream has only one retransmission; prefer 48_4_1 or SQ mono.
+  Separate BIGs would use the airtime better (How-To guide, Figure 3.3) but the controller supports one BIG
+  per advertising set here.
+- **Encoder load with 4 BIS is close to the 10 ms frame:** mean 7.7 ms, maximum 8.3–9.7 ms per frame set with
+  24_2_1 stereo + 48_6_1 stereo (3 BIS: max. 7.2–7.8 ms). Runs of 2–5 min show no underrun, send error or
+  watchdog refill, because two SDUs per BIS are queued in the controller (20 ms of slack). A 4-BIS
+  configuration should be checked with `proc_us_max` in the status line after any firmware change.
+- **The PC receiver sometimes delivers silence for a 4-BIS BIG.** In some `measure_latency.py` runs every SDU of
+  all four BIS arrived as LC3 silence (all-zero bytes) for the whole capture, while the board's status line
+  showed music at the encoders and `zero_sdus=0` (no all-zero SDU sent) and the same configuration decoded
+  fine in the previous or next run. 1, 2 and 3 BIS never showed this. The MediaTek MT7902 / BlueZ side also
+  failed to sync at all in other runs (`restart: no broadcast found`). Treat a silent 4-BIS measurement as a
+  receiver problem and repeat it.
 - **Board:** the ES8311 codec occupies I2S pins 52–56, so the FPGA connects through J2 and the GPIO matrix. Avoid
   the strapping pins 36/37/60/61.
 - **No real hearing aid tested yet.** AirPods cannot receive Auracast.
@@ -441,5 +497,8 @@ cmake -S components/ctrl_regs/host_test -B build_host_ctrl && cmake --build buil
 | 2026-10-19 | Live mode 24_2_1 mono | 1 BIS without channel allocation, context Live, PBA with SQ and Immediate Rendering metadata; processing max. 1.8 ms per 10 ms (48_4_1 stereo: 4.9 ms) |
 | 2026-10-19 | Glitch check against the AES67 reference | 48_4_1 and 24_2_1, 9 recordings of 20–60 s: 0 disturbed blocks, 0 lost SDUs |
 | 2026-10-19 | I2C control firmware at the FPGA, no host | without AUTOSTART: waits, a 30 s scan finds no broadcast. With AUTOSTART: 24_2_1 mono 2 min `RUN` with all counters 0; 16_2_1 mono and stereo, 48_4_1 stereo `RUN` |
+| 2026-10-20 | Two subgroups (SQ + HQ) in one BIG | 24_2_1 mono + 48_6_1 stereo (3 BIS) and 24_2_1 stereo + 48_6_1 / 48_4_1 stereo (4 BIS): 2–5 min `RUN`, underrun/ovf/lost/senderr 0, PBA with SQ and HQ; PC receives all BIS, latency per BIS measured (see Latency); single-subgroup regression 24_2_1 mono 40.7 ms |
+| 2026-10-20 | BIG airtime | controller rejects 3 BIS × 155 B at RTN 4 and 4 BIS × 155 B at RTN 2 (`Unsupported Value`), accepts 4 BIS × 120 B at RTN 2 and 4 BIS × 155 B at RTN 1 |
+| 2026-10-20 | Encoder load, two subgroups | 3 BIS (48_6_1): max. 7.2–7.8 ms per 10 ms; 4 BIS (48_6_1): mean 7.7 ms, max. 8.3–9.7 ms; free heap 95 / 86 KB |
 | open | Hearing aid / consumer LE Audio receiver | — |
 | open | I2C control with the Zephyr host | — |
