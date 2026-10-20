@@ -289,7 +289,14 @@ static esp_err_t source_create(void)
         s_qos.latency = q->latency > s_qos.latency ? q->latency : s_qos.latency;
     }
     if (s_sub_count > 1) {
-        s_qos.rtn = big_rtn_fit(s_stream_count, s_qos.sdu, s_qos.rtn);
+        const uint8_t wanted = s_qos.rtn;
+        s_qos.rtn = big_rtn_fit_enc(s_stream_count, s_qos.sdu, wanted, encrypted());
+        if (s_qos.rtn < wanted) {
+            ESP_LOGW(TAG, "BIG airtime: RTN reduced from %u to %u for %u BIS x %u bytes (%lu us of %u us per interval)",
+                     wanted, s_qos.rtn, s_stream_count, s_qos.sdu,
+                     (unsigned long)big_airtime_us_enc(s_stream_count, s_qos.sdu, s_qos.rtn, encrypted()),
+                     BIG_AIRTIME_BUDGET_US);
+        }
     }
     s_qos.pd = s_cfg.pd_us;
 
@@ -383,7 +390,10 @@ esp_err_t broadcast_configure(const ctrl_config_t *cfg)
     if (cfg->preset >= AURA_PRESET_COUNT || cfg->channels >= AURA_CH_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (cfg->hq_preset != AURA_PRESET_NONE && (cfg->hq_preset >= AURA_PRESET_COUNT || cfg->hq_channels >= AURA_CH_COUNT)) {
+    if (cfg->hq_preset != AURA_PRESET_NONE &&
+        (cfg->hq_preset >= AURA_PRESET_COUNT || cfg->hq_channels >= AURA_CH_COUNT ||
+         !ctrl_preset_is_hq(cfg->hq_preset) || ctrl_preset_is_hq(cfg->preset))) {
+        /* Same rules as ctrl_regs_get_config(): the HQ subgroup is 48 kHz, the first one is not */
         return ESP_ERR_INVALID_ARG;
     }
     s_cfg = *cfg;

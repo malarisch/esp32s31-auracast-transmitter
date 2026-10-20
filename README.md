@@ -258,7 +258,7 @@ holds what depends on the board.
 The pipeline logs a status line every 5 s:
 
 ```
-pipeline: state=RUN fill=840.0 ppm=-0.07 in_ppm=-0.87 underrun=0 ovf=0 lost=0 senderr=0 wd=1 tick_us=[9674..10348] mean=10000.0 proc_us_max=2090 proc_us_mean=1850 sent=11795 heap=99328 bt_ppm=+0.72
+pipeline: state=RUN fill=840.0 ppm=-0.07 in_ppm=-0.87 underrun=0 ovf=0 lost=0 senderr=0 wd=1 tick_us=[9674..10348] mean=10000.0 proc_us_max=2090 proc_us_mean=1850 late=0 sent=11795 heap=99328 bt_ppm=+0.72
 pipeline: zero_sdus=0 pcm peak dBFS: -15.1 -14.3 -240.0 -240.0
 pipeline: i2s bits=0xffffff00
 ```
@@ -274,6 +274,7 @@ pipeline: i2s bits=0xffffff00
 | `senderr` / `wd` | send errors / watchdog refills of the controller queue (one at start-up is normal) |
 | `tick_us` / `mean` | interval of the controller's SDU confirmations, min..max / mean |
 | `proc_us_max` / `proc_us_mean` | longest / mean processing time per SDU set (resampler + LC3), budget 10 000 µs |
+| `late` | SDU sets in the window that took longer than 10 ms (the two queued SDUs absorb single ones) |
 | `sent` | confirmed SDU sets since start |
 | `heap` | free heap in bytes |
 | `bt_ppm` | SDU tick rate against `esp_timer`, cumulative |
@@ -436,7 +437,8 @@ point that runs without underruns, given the block and DMA granularity.
 - **Two subgroups share one BIG QoS, and airtime limits the retransmissions.** Every sub-event of the BIG is sized
   for the larger PDU, also for the 60-byte SQ BIS. The controller rejects a BIG that does not fit the 10 ms ISO
   interval (`BT_HCI: opcode=0x2068, status= 11: Unsupported Value`, state `FAULT`), so the firmware reduces the RTN
-  with an airtime model (`components/audio_dsp/big_airtime.c`, budget 8.5 ms): 3 BIS with 48_6_1 get RTN 2,
+  with an airtime model (`components/audio_dsp/big_airtime.c`, budget 8.5 ms, 4 MIC bytes per PDU when
+  encrypted; a reduction is logged at start): 3 BIS with 48_6_1 get RTN 2,
   4 BIS with 48_4_1 RTN 2, 4 BIS with 48_6_1 RTN 1. The SQ BIS get the same RTN as the HQ BIS, so with a
   stereo SQ subgroup and 48_6_1 the hearing-aid stream has only one retransmission; prefer 48_4_1 or SQ mono.
   Separate BIGs would use the airtime better (How-To guide, Figure 3.3) but the controller supports one BIG
@@ -444,7 +446,8 @@ point that runs without underruns, given the block and DMA granularity.
 - **Encoder load with 4 BIS is close to the 10 ms frame:** mean 7.7 ms, maximum 8.3–9.7 ms per frame set with
   24_2_1 stereo + 48_6_1 stereo (3 BIS: max. 7.2–7.8 ms). Runs of 2–5 min show no underrun, send error or
   watchdog refill, because two SDUs per BIS are queued in the controller (20 ms of slack). A 4-BIS
-  configuration should be checked with `proc_us_max` in the status line after any firmware change.
+  configuration should be checked with `proc_us_max` and `late` in the status line after any firmware change; the
+firmware logs a warning at start for 4 BIS with 48_6_1.
 - **The PC receiver sometimes delivers silence for a 4-BIS BIG.** In some `measure_latency.py` runs every SDU of
   all four BIS arrived as LC3 silence (all-zero bytes) for the whole capture, while the board's status line
   showed music at the encoders and `zero_sdus=0` (no all-zero SDU sent) and the same configuration decoded

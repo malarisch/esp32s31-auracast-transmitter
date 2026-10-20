@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -18,11 +19,15 @@ extern "C" {
  */
 #define BIG_AIRTIME_BUDGET_US 8500
 
-/* Microseconds per ISO interval for `bis` BIS with Max_SDU `sdu` octets and `rtn` retransmissions */
+/* Microseconds per ISO interval for `bis` BIS with Max_SDU `sdu` octets and `rtn` retransmissions, unencrypted */
 uint32_t big_airtime_us(uint8_t bis, uint16_t sdu, uint8_t rtn);
 
-/* The largest RTN <= rtn_wanted whose airtime fits the budget (0 if even that does not fit) */
+/* Same; an encrypted BIS PDU carries a 4-byte MIC */
+uint32_t big_airtime_us_enc(uint8_t bis, uint16_t sdu, uint8_t rtn, bool encrypted);
+
+/* The largest RTN <= rtn_wanted whose airtime fits the budget (0 if even that does not fit), unencrypted */
 uint8_t big_rtn_fit(uint8_t bis, uint16_t sdu, uint8_t rtn_wanted);
+uint8_t big_rtn_fit_enc(uint8_t bis, uint16_t sdu, uint8_t rtn_wanted, bool encrypted);
 
 #ifdef __cplusplus
 }

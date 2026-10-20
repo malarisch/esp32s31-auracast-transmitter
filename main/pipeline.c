@@ -92,6 +92,7 @@ typedef struct {
     uint32_t proc_n;
     uint32_t pcm_peak[BROADCAST_MAX_BIS];   /* largest |sample| fed to each encoder */
     uint32_t zero_sdus;                     /* SDUs sent whose bytes were all zero (LC3 silence) */
+    uint32_t late;                          /* SDU sets whose processing took longer than the 10 ms interval */
 } window_stats_t;
 
 static portMUX_TYPE s_win_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -285,6 +286,10 @@ static void source_init(void)
         s_rs = resampler_create_decim(2, FRAMES, 1);
         s_dec_sq = decimator_create(s_sg[0]->bis_count, (uint8_t)(48000 / s_sg[0]->rate), FRAMES);
         ESP_ERROR_CHECK(s_rs && s_dec_sq ? ESP_OK : ESP_ERR_NO_MEM);
+        if (s_nbis == BROADCAST_MAX_BIS && s_sg[1]->sdu_len >= 155) {
+            ESP_LOGW(TAG, "4 BIS with 48_6_1: encoder load close to the 10 ms frame (measured mean 7.7 ms, max up to 9.7 ms); "
+                     "watch late= in the status line, prefer 48_4_1 or a mono SQ subgroup");
+        }
     } else {
         s_rs_out_frames = s_bis[0].out_frames;
         s_rs = resampler_create_decim(s_nbis, s_rs_out_frames, (uint8_t)(48000 / s_sg[0]->rate));   /* 1, 2, 3 */
@@ -672,6 +677,7 @@ static void produce_frame(void)
     s_win.proc_us_max = proc > s_win.proc_us_max ? proc : s_win.proc_us_max;
     s_win.proc_us_sum += proc;
     s_win.proc_n++;
+    s_win.late += proc > 10000;
     portEXIT_CRITICAL(&s_win_lock);
 }
 
@@ -691,12 +697,12 @@ static void stats_task(void *arg)
         broadcast_get_stats(&st, true);
         source_log_fields(&w, &fill, &ppm, &in_ppm, &underrun, &ovf, &lost);
         ESP_LOGI(TAG, "state=%s fill=%.1f ppm=%+.2f in_ppm=%+.2f underrun=%lu ovf=%lu lost=%lu senderr=%lu wd=%lu "
-                 "tick_us=[%lu..%lu] mean=%.1f proc_us_max=%lu proc_us_mean=%lu sent=%lu heap=%lu bt_ppm=%+.2f",
+                 "tick_us=[%lu..%lu] mean=%.1f proc_us_max=%lu proc_us_mean=%lu late=%lu sent=%lu heap=%lu bt_ppm=%+.2f",
                  source_state(), fill, ppm, in_ppm, (unsigned long)underrun, (unsigned long)ovf,
                  (unsigned long)lost, (unsigned long)st.send_err, (unsigned long)st.wd_refills,
                  (unsigned long)st.tick_us_min, (unsigned long)st.tick_us_max, st.tick_us_mean,
                  (unsigned long)w.proc_us_max, (unsigned long)(w.proc_n ? w.proc_us_sum / w.proc_n : 0),
-                 (unsigned long)st.sent, (unsigned long)esp_get_free_heap_size(), st.bt_ppm);
+                 (unsigned long)w.late, (unsigned long)st.sent, (unsigned long)esp_get_free_heap_size(), st.bt_ppm);
         ESP_LOGI(TAG, "zero_sdus=%lu pcm peak dBFS: %.1f %.1f %.1f %.1f", (unsigned long)w.zero_sdus,
                  20.0 * log10((double)w.pcm_peak[0] / 2147483648.0 + 1e-12), 20.0 * log10((double)w.pcm_peak[1] / 2147483648.0 + 1e-12),
                  20.0 * log10((double)w.pcm_peak[2] / 2147483648.0 + 1e-12), 20.0 * log10((double)w.pcm_peak[3] / 2147483648.0 + 1e-12));

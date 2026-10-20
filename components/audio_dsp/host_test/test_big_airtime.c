@@ -20,6 +20,18 @@ static void test_subevent_model(void)
     CHECK(big_airtime_us(1, 60, 0) == 1 * 1 * ((11 + 60) * 4 + 150));
 }
 
+/* Encrypted BIS PDUs carry a 4-byte MIC: 16 us more per subevent on the 2M PHY */
+static void test_encryption_mic(void)
+{
+    CHECK(big_airtime_us_enc(3, 155, 2, true) == big_airtime_us(3, 155, 2) + 3 * 3 * 16);
+    CHECK(big_airtime_us_enc(3, 155, 2, false) == big_airtime_us(3, 155, 2));
+    /* 2 BIS x 155 B x RTN 4 = 8140 us unencrypted, 8300 us encrypted: both still fit */
+    CHECK(big_rtn_fit_enc(2, 155, 4, true) == 4);
+    /* 4 BIS x 120 B x RTN 2: 8088 us unencrypted (fits), 8280 us encrypted (fits) */
+    CHECK(big_rtn_fit_enc(4, 120, 2, true) == 2);
+    CHECK(big_rtn_fit_enc(4, 155, 2, true) == 1);
+}
+
 static void test_rtn_fit(void)
 {
     CHECK(big_rtn_fit(3, 155, 4) == 2);
@@ -35,5 +47,6 @@ int main(void)
     RUN_TEST(test_observed_accept_reject);
     RUN_TEST(test_subevent_model);
     RUN_TEST(test_rtn_fit);
+    RUN_TEST(test_encryption_mic);
     TEST_MAIN_RETURN();
 }
