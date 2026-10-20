@@ -49,6 +49,21 @@ menu "AES67 Auracast bridge"
                 Normally the S31 waits after boot until the I2C master has written the configuration and
                 sent START. With this option it starts at once with the power-on register values
                 (AURA_DEFAULT_* in auracast_i2c_regs.h: 24_2_1 mono Live). The I2C slave still runs.
+        config AURACAST_AUTOSTART_HQ_PRESET
+            int "AUTOSTART: HQ subgroup preset (register 0x50)"
+            depends on AURACAST_AUTOSTART
+            range 2 255
+            default 255
+            help
+                255 = no HQ subgroup; 2 48_2_1, 3 48_4_1, 4 48_6_1: a second subgroup at 48 kHz in the same
+                BIG, next to the Standard Quality one.
+        config AURACAST_AUTOSTART_CHANNELS
+            int "AUTOSTART: channel mode of the first subgroup (register 0x11)"
+            depends on AURACAST_AUTOSTART
+            range 0 3
+            default 0
+            help
+                0 mono (L+R)/2, 1 stereo (2 BIS), 2 mono left, 3 mono right.
     endmenu
 
     choice AURACAST_SOURCE

@@ -41,7 +41,8 @@ static uint32_t get32(const uint8_t *p)
 static bool is_config_reg(uint8_t a)
 {
     return (a >= AURA_REG_PRESET && a < AURA_REG_BROADCAST_ID + 4) ||
-           (a >= AURA_REG_NAME && a < AURA_REG_CODE + AURA_CODE_SIZE);
+           (a >= AURA_REG_NAME && a < AURA_REG_CODE + AURA_CODE_SIZE) ||
+           (a >= AURA_REG_HQ_PRESET && a < AURA_REG_HQ_CONTEXT + 2);
 }
 
 static bool config_unlocked(const ctrl_regs_t *r)
@@ -68,6 +69,9 @@ void ctrl_regs_init(ctrl_regs_t *r, const uint8_t fw_version[3], uint8_t reset_r
     put16(&r->mem[AURA_REG_FIFO_TARGET], AURA_DEFAULT_FIFO_TARGET);
     put32(&r->mem[AURA_REG_BROADCAST_ID], AURA_DEFAULT_BROADCAST_ID);
     memcpy(&r->mem[AURA_REG_NAME], AURA_DEFAULT_NAME, sizeof(AURA_DEFAULT_NAME) - 1);
+    r->mem[AURA_REG_HQ_PRESET] = AURA_DEFAULT_HQ_PRESET;
+    r->mem[AURA_REG_HQ_CHANNELS] = AURA_DEFAULT_HQ_CHANNELS;
+    put16(&r->mem[AURA_REG_HQ_CONTEXT], AURA_DEFAULT_HQ_CONTEXT);
 }
 
 ctrl_cmd_t ctrl_regs_write(ctrl_regs_t *r, const uint8_t *buf, size_t len)
@@ -143,6 +147,10 @@ uint8_t ctrl_regs_get_config(const ctrl_regs_t *r, ctrl_config_t *out, uint8_t *
     memcpy(out->name, &m[AURA_REG_NAME], name_len);
     out->code_len = (uint8_t)field_len(&m[AURA_REG_CODE], AURA_CODE_SIZE);
     memcpy(out->code, &m[AURA_REG_CODE], out->code_len);
+    out->hq_preset = m[AURA_REG_HQ_PRESET];
+    out->hq_channels = m[AURA_REG_HQ_CHANNELS];
+    out->hq_context = get16(&m[AURA_REG_HQ_CONTEXT]);
+    const bool hq = out->hq_preset != AURA_PRESET_NONE;
 
     uint8_t bad;
     if (out->preset >= AURA_PRESET_COUNT) {
@@ -163,6 +171,13 @@ uint8_t ctrl_regs_get_config(const ctrl_regs_t *r, ctrl_config_t *out, uint8_t *
         bad = AURA_REG_BROADCAST_ID;
     } else if (name_len < AURA_NAME_MIN_LEN) {
         bad = AURA_REG_NAME;
+    } else if (hq && (!ctrl_preset_is_hq(out->hq_preset) || ctrl_preset_is_hq(out->preset))) {
+        /* the HQ subgroup must be 48 kHz, and the first subgroup must then be Standard Quality */
+        bad = AURA_REG_HQ_PRESET;
+    } else if (hq && out->hq_channels >= AURA_CH_COUNT) {
+        bad = AURA_REG_HQ_CHANNELS;
+    } else if (hq && (out->hq_context == 0 || (out->hq_context & ~AURA_CONTEXT_MASK))) {
+        bad = AURA_REG_HQ_CONTEXT;
     } else {
         return AURA_ERR_NONE;
     }
@@ -210,7 +225,21 @@ uint16_t ctrl_preset_sdu(uint8_t preset)
     return preset < AURA_PRESET_COUNT ? s_presets[preset].sdu : 0;
 }
 
+bool ctrl_preset_is_hq(uint8_t preset)
+{
+    return ctrl_preset_rate(preset) == 48000;
+}
+
 uint8_t ctrl_channels_bis(uint8_t channels)
 {
     return channels == AURA_CH_STEREO ? 2 : 1;
+}
+
+uint8_t ctrl_config_bis_total(const ctrl_config_t *c)
+{
+    uint8_t n = ctrl_channels_bis(c->channels);
+    if (c->hq_preset != AURA_PRESET_NONE) {
+        n += ctrl_channels_bis(c->hq_channels);
+    }
+    return n;
 }

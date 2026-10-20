@@ -389,6 +389,73 @@ static void test_preset_tables(void)
     CHECK(ctrl_channels_bis(AURA_CH_MONO_RIGHT) == 1);
 }
 
+static void test_hq_defaults(void)
+{
+    ctrl_regs_t r;
+    fresh(&r);
+    uint8_t b[4];
+    rd(&r, AURA_REG_HQ_PRESET, b, 4);
+    CHECK(b[0] == AURA_PRESET_NONE && b[1] == AURA_CH_STEREO && b[2] == 0x04 && b[3] == 0x00);
+    CHECK(rd8(&r, AURA_REG_PROTO_VERSION) == 2);
+    ctrl_config_t c;
+    uint8_t bad;
+    CHECK(ctrl_regs_get_config(&r, &c, &bad) == AURA_ERR_NONE);
+    CHECK(c.hq_preset == AURA_PRESET_NONE && ctrl_config_bis_total(&c) == 1);
+}
+
+static void test_hq_validation(void)
+{
+    ctrl_regs_t r;
+    ctrl_config_t c;
+    uint8_t bad;
+    fresh(&r);
+    wr8(&r, AURA_REG_HQ_PRESET, AURA_PRESET_24_2_1);   /* not an HQ preset */
+    CHECK(ctrl_regs_get_config(&r, &c, &bad) == AURA_ERR_BAD_VALUE && bad == AURA_REG_HQ_PRESET);
+    fresh(&r);
+    wr8(&r, AURA_REG_HQ_PRESET, 5);                    /* out of range */
+    CHECK(ctrl_regs_get_config(&r, &c, &bad) == AURA_ERR_BAD_VALUE && bad == AURA_REG_HQ_PRESET);
+    fresh(&r);
+    wr8(&r, AURA_REG_PRESET, AURA_PRESET_48_4_1);      /* two HQ subgroups */
+    wr8(&r, AURA_REG_HQ_PRESET, AURA_PRESET_48_2_1);
+    CHECK(ctrl_regs_get_config(&r, &c, &bad) == AURA_ERR_BAD_VALUE && bad == AURA_REG_HQ_PRESET);
+    fresh(&r);
+    wr8(&r, AURA_REG_HQ_PRESET, AURA_PRESET_48_4_1);
+    wr8(&r, AURA_REG_HQ_CHANNELS, 4);
+    CHECK(ctrl_regs_get_config(&r, &c, &bad) == AURA_ERR_BAD_VALUE && bad == AURA_REG_HQ_CHANNELS);
+    fresh(&r);
+    wr8(&r, AURA_REG_HQ_PRESET, AURA_PRESET_48_4_1);
+    wr16(&r, AURA_REG_HQ_CONTEXT, 0);
+    CHECK(ctrl_regs_get_config(&r, &c, &bad) == AURA_ERR_BAD_VALUE && bad == AURA_REG_HQ_CONTEXT);
+    fresh(&r);
+    wr8(&r, AURA_REG_HQ_PRESET, AURA_PRESET_48_4_1);
+    wr16(&r, AURA_REG_HQ_CONTEXT, 0x1000);
+    CHECK(ctrl_regs_get_config(&r, &c, &bad) == AURA_ERR_BAD_VALUE && bad == AURA_REG_HQ_CONTEXT);
+    /* valid: 24_2_1 mono + 48_6_1 stereo = 3 BIS */
+    fresh(&r);
+    wr8(&r, AURA_REG_HQ_PRESET, AURA_PRESET_48_6_1);
+    CHECK(ctrl_regs_get_config(&r, &c, &bad) == AURA_ERR_NONE);
+    CHECK(c.hq_preset == AURA_PRESET_48_6_1 && c.hq_channels == AURA_CH_STEREO && c.hq_context == 0x0004);
+    CHECK(ctrl_config_bis_total(&c) == 3);
+    /* HQ off: HQ_CHANNELS/HQ_CONTEXT are not checked */
+    fresh(&r);
+    wr8(&r, AURA_REG_HQ_CHANNELS, 9);
+    wr16(&r, AURA_REG_HQ_CONTEXT, 0);
+    CHECK(ctrl_regs_get_config(&r, &c, &bad) == AURA_ERR_NONE);
+    CHECK(ctrl_preset_is_hq(AURA_PRESET_48_2_1) && !ctrl_preset_is_hq(AURA_PRESET_16_2_1));
+}
+
+static void test_hq_regs_locked_and_writable(void)
+{
+    ctrl_regs_t r;
+    fresh(&r);
+    CHECK(wr8(&r, AURA_REG_HQ_PRESET, AURA_PRESET_48_4_1) == CTRL_CMD_NONE && rd8(&r, AURA_REG_ERROR) == AURA_ERR_NONE);
+    CHECK(rd8(&r, AURA_REG_HQ_PRESET) == AURA_PRESET_48_4_1);
+    CHECK(wr8(&r, 0x54, 1) == CTRL_CMD_NONE && rd8(&r, AURA_REG_ERROR) == AURA_ERR_READ_ONLY);   /* past the block */
+    ctrl_regs_set_state(&r, AURA_STATE_STREAMING, 0, 0);
+    wr8(&r, AURA_REG_HQ_PRESET, AURA_PRESET_NONE);
+    CHECK(rd8(&r, AURA_REG_ERROR) == AURA_ERR_LOCKED && rd8(&r, AURA_REG_HQ_PRESET) == AURA_PRESET_48_4_1);
+}
+
 int main(void)
 {
     RUN_TEST(test_init_magic_defaults);
@@ -403,5 +470,8 @@ int main(void)
     RUN_TEST(test_status_block_layout);
     RUN_TEST(test_pointer_wraps);
     RUN_TEST(test_preset_tables);
+    RUN_TEST(test_hq_defaults);
+    RUN_TEST(test_hq_validation);
+    RUN_TEST(test_hq_regs_locked_and_writable);
     return g_test_failures ? 1 : 0;
 }

@@ -35,6 +35,9 @@ typedef struct {
     char name[AURA_NAME_SIZE + 1];
     uint8_t code[AURA_CODE_SIZE];
     uint8_t code_len;           /* 0 = unencrypted */
+    uint8_t hq_preset;          /* AURA_PRESET_48_* or AURA_PRESET_NONE (no HQ subgroup) */
+    uint8_t hq_channels;        /* AURA_CH_* of the HQ subgroup (valid if hq_preset != NONE) */
+    uint16_t hq_context;
 } ctrl_config_t;
 
 typedef struct {
@@ -83,8 +86,14 @@ void ctrl_regs_set_status(ctrl_regs_t *r, const ctrl_status_t *s);
 uint32_t ctrl_preset_rate(uint8_t preset);
 uint16_t ctrl_preset_sdu(uint8_t preset);
 
+/* High Quality preset (48 kHz) */
+bool ctrl_preset_is_hq(uint8_t preset);
+
 /* Number of BIS for a channel mode */
 uint8_t ctrl_channels_bis(uint8_t channels);
+
+/* Total number of BIS of a validated configuration: both subgroups (1..4) */
+uint8_t ctrl_config_bis_total(const ctrl_config_t *c);
 
 #ifdef __cplusplus
 }
