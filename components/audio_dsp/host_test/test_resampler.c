@@ -144,6 +144,12 @@ static void test_decim2_sine_1k(void)
     check_sine_decim(1000, 1.0 + 100e-6, 90.0, 2);
 }
 
+/* Fixed decimator (ratio exactly 1.0): the SQ path of the dual-subgroup pipeline */
+static void test_decim2_ratio_one_sine(void)
+{
+    check_sine_decim(1000, 1.0, 90.0, 2);
+}
+
 static void test_decim2_sine_9k(void)
 {
     check_sine_decim(9000, 1.0 + 100e-6, 70.0, 2);
@@ -375,6 +381,7 @@ int main(void)
     RUN_TEST(test_ratio_toggle_no_jump);
     RUN_TEST(test_fullscale_square_no_wrap);
     RUN_TEST(test_decim2_sine_1k);
+    RUN_TEST(test_decim2_ratio_one_sine);
     RUN_TEST(test_decim2_sine_9k);
     RUN_TEST(test_decim2_alias_14k);
     RUN_TEST(test_decim2_frame_accounting);

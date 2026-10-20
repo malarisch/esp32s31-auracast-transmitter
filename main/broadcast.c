@@ -34,6 +34,7 @@
 
 #include "ble_audio_example_utils.h"
 
+#include "big_airtime.h"
 #include "tx_pacing.h"
 
 #include "adv.h"
@@ -275,13 +276,20 @@ static esp_err_t source_create(void)
         subgroups[g].codec_cfg = codec;
     }
 
-    /* One QoS per BIG: the maximum of the subgroup presets (RTN, SDU, transport latency) */
+    /*
+     * One QoS per BIG: the maximum SDU, RTN and transport latency of the subgroup presets. Every subevent
+     * is sized for Max_PDU (the HQ frame), so with two subgroups the RTN is reduced until the BIG fits the
+     * ISO interval (big_airtime.h); otherwise the controller rejects it ("Unsupported Value").
+     */
     s_qos = s_sub_preset[0].qos;
     for (int g = 1; g < s_sub_count; g++) {
         const esp_ble_audio_bap_qos_cfg_t *q = &s_sub_preset[g].qos;
         s_qos.sdu = q->sdu > s_qos.sdu ? q->sdu : s_qos.sdu;
         s_qos.rtn = q->rtn > s_qos.rtn ? q->rtn : s_qos.rtn;
         s_qos.latency = q->latency > s_qos.latency ? q->latency : s_qos.latency;
+    }
+    if (s_sub_count > 1) {
+        s_qos.rtn = big_rtn_fit(s_stream_count, s_qos.sdu, s_qos.rtn);
     }
     s_qos.pd = s_cfg.pd_us;
 
