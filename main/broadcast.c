@@ -255,15 +255,15 @@ static esp_err_t source_create(void)
             stream_params[i].data_len = stereo ? (b == 0 ? sizeof(chan_left) : sizeof(chan_right)) : 0;
             esp_ble_audio_bap_stream_cb_register(&s_streams[i].stream, &s_stream_ops);
         }
-        if (stereo) {
-            err = esp_ble_audio_codec_cfg_set_chan_allocation(codec, ESP_BLE_AUDIO_LOCATION_FRONT_LEFT |
-                                                              ESP_BLE_AUDIO_LOCATION_FRONT_RIGHT);
-        } else {
-            /* A mono stream must not carry an Audio_Channel_Allocation LTV (Auracast transmitter guide) */
-            err = esp_ble_audio_codec_cfg_unset_val(codec, ESP_BLE_AUDIO_CODEC_CFG_CHAN_ALLOC);
-        }
+        /*
+         * No Audio_Channel_Allocation at subgroup level (BASE level 2): a mono stream must not carry one
+         * (Auracast transmitter guide), and for stereo the per-BIS LTVs (level 3) say FL / FR. A level-2
+         * FL|FR next to them made real receivers (hearing-aid class and Sennheiser headphones) treat the
+         * 48 kHz BIS as 2-channel (2 x 120 octets) and refuse the whole broadcast ("Unknown").
+         */
+        err = esp_ble_audio_codec_cfg_unset_val(codec, ESP_BLE_AUDIO_CODEC_CFG_CHAN_ALLOC);
         if (err) {
-            ESP_LOGW(TAG, "subgroup %d: setting the channel allocation failed, err %d", g, err);
+            ESP_LOGW(TAG, "subgroup %d: removing the channel allocation failed, err %d", g, err);
         }
         const uint16_t context = g == 0 ? s_cfg.context : s_cfg.hq_context;
         err = esp_ble_audio_codec_cfg_meta_set_stream_context(codec, (esp_ble_audio_context_t)context);
@@ -446,6 +446,8 @@ esp_err_t broadcast_start(broadcast_tick_cb_t tick, void *arg)
     if (ext_len == 0 || per_len == 0) {
         return ESP_FAIL;
     }
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, ext, ext_len, ESP_LOG_INFO);   /* extended advertising: 0x1852, PBA, name */
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, per, per_len, ESP_LOG_INFO);   /* periodic advertising: BASE */
     if (adv_start(ext, ext_len, per, per_len, s_cfg.tx_power_dbm)) {
         return ESP_FAIL;
     }

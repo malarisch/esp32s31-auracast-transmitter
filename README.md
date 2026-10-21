@@ -448,12 +448,16 @@ point that runs without underruns, given the block and DMA granularity.
   watchdog refill, because two SDUs per BIS are queued in the controller (20 ms of slack). A 4-BIS
   configuration should be checked with `proc_us_max` and `late` in the status line after any firmware change; the
 firmware logs a warning at start for 4 BIS with 48_6_1.
-- **The PC receiver sometimes delivers silence for a 4-BIS BIG.** In some `measure_latency.py` runs every SDU of
-  all four BIS arrived as LC3 silence (all-zero bytes) for the whole capture, while the board's status line
-  showed music at the encoders and `zero_sdus=0` (no all-zero SDU sent) and the same configuration decoded
-  fine in the previous or next run. 1, 2 and 3 BIS never showed this. The MediaTek MT7902 / BlueZ side also
-  failed to sync at all in other runs (`restart: no broadcast found`). Treat a silent 4-BIS measurement as a
-  receiver problem and repeat it.
+- **A silent capture means a silent input, not a broken BIG.** Several 4-BIS measurements on 2026-10-20/21
+  decoded every BIS as LC3 silence (all-zero SDUs) while the AES67 stream on the network carried music; the cause
+  was an FPGA that was not configured and fed silence over I2S. The status line now shows it directly:
+  `pcm peak dBFS` −240 on every BIS and `zero_sdus` counting up. Check these before suspecting the radio.
+- **No Audio_Channel_Allocation at subgroup level.** The firmware first announced stereo subgroups with
+  `FL|FR` in the level-2 codec configuration next to the per-BIS FL / FR entries (level 3). Real receivers (a
+  hearing-aid class Auracast receiver and Sennheiser headphones) then treated the 48 kHz BIS as two-channel
+  (2 × 120 octets), showed the broadcast as "Unknown" and refused it, while BlueZ on the PC decoded it. The
+  24 kHz stereo subgroup passed (2 × 60 octets). Since 2026-10-21 only the level-3 entries carry the
+  allocation, as in the Auracast guides' BASE examples; the firmware logs the advertising payloads at start.
 - **Board:** the ES8311 codec occupies I2S pins 52–56, so the FPGA connects through J2 and the GPIO matrix. Avoid
   the strapping pins 36/37/60/61.
 - **No real hearing aid tested yet.** AirPods cannot receive Auracast.
