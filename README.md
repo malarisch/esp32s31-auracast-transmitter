@@ -181,12 +181,13 @@ Configuration registers are writable in `WAIT_CONFIG` and `CONFIG_ERROR`; afterw
 At START the S31 checks every range above and requires a name of at least 4 bytes. A value the Bluetooth stack
 still refuses leads to `FAULT` / `START_FAILED`; only RESET helps.
 
-**Two subgroups.** With `HQ_PRESET` set, the BIG carries subgroup 0 (PRESET / CHANNELS / CONTEXT, Standard
-Quality) followed by subgroup 1 (the HQ registers); BIS 0 … n belong to the SQ subgroup, the HQ BIS follow. All
-BIS of a BIG share one QoS: SDU interval 10 ms, the larger SDU size, the longer transport latency (20 ms) and the
-presentation delay `PD_US`. Every sub-event is sized for the larger PDU, so the retransmission count is reduced
-until the BIG fits the ISO interval (see [Known issues](#known-issues-and-limitations)). A master that never
-writes 0x50 gets exactly the protocol 1 behaviour.
+**Two subgroups.** With `HQ_PRESET` set, the BIG carries the Standard Quality subgroup (PRESET / CHANNELS /
+CONTEXT) and the High Quality subgroup (the HQ registers). **Order in the BIG:** a stereo subgroup comes first so
+its pair is BIS 1 and 2 (real receivers only synchronise to a stereo pair there, see Known issues); when both or
+neither are stereo, SQ comes first. The start log names the order. All BIS of a BIG share one QoS: SDU interval
+10 ms, the larger SDU size, the longer transport latency (20 ms) and the presentation delay `PD_US`. Every
+sub-event is sized for the larger PDU, so the retransmission count is reduced until the BIG fits the ISO interval
+(see Known issues). A master that never writes 0x50 gets exactly the protocol 1 behaviour.
 
 ### Status block
 
@@ -458,6 +459,12 @@ firmware logs a warning at start for 4 BIS with 48_6_1.
   (2 × 120 octets), showed the broadcast as "Unknown" and refused it, while BlueZ on the PC decoded it. The
   24 kHz stereo subgroup passed (2 × 60 octets). Since 2026-10-21 only the level-3 entries carry the
   allocation, as in the Auracast guides' BASE examples; the firmware logs the advertising payloads at start.
+- **Receivers take a stereo pair only at BIS 1 and 2.** With the SQ mono subgroup first, the HQ stereo pair sat
+  at BIS 2 and 3; the same receivers and headphones that play "HQ stereo alone" (BIS 1 and 2) and "SQ stereo +
+  HQ mono" could not subscribe, with PD 20 and 40 ms alike, while the PC decoded the pair (slowly and only on a
+  second attempt). With the stereo subgroup moved to the front (2026-10-21) "SQ mono + HQ stereo" plays. Hence
+  **one stereo subgroup per BIG**: with SQ stereo + HQ stereo the second pair (BIS 3 and 4) is expected to fail
+  on such receivers; use SQ mono + HQ stereo, or SQ stereo + HQ mono.
 - **Board:** the ES8311 codec occupies I2S pins 52–56, so the FPGA connects through J2 and the GPIO matrix. Avoid
   the strapping pins 36/37/60/61.
 - **No real hearing aid tested yet.** AirPods cannot receive Auracast.
@@ -504,6 +511,7 @@ cmake -S components/ctrl_regs/host_test -B build_host_ctrl && cmake --build buil
 | 2026-10-19 | Live mode 24_2_1 mono | 1 BIS without channel allocation, context Live, PBA with SQ and Immediate Rendering metadata; processing max. 1.8 ms per 10 ms (48_4_1 stereo: 4.9 ms) |
 | 2026-10-19 | Glitch check against the AES67 reference | 48_4_1 and 24_2_1, 9 recordings of 20–60 s: 0 disturbed blocks, 0 lost SDUs |
 | 2026-10-19 | I2C control firmware at the FPGA, no host | without AUTOSTART: waits, a 30 s scan finds no broadcast. With AUTOSTART: 24_2_1 mono 2 min `RUN` with all counters 0; 16_2_1 mono and stereo, 48_4_1 stereo `RUN` |
+| 2026-10-21 | Real Auracast receivers (hearing-aid class device, Sennheiser headphones), two subgroups | mono + mono, SQ stereo + HQ mono and (stereo subgroup first) SQ mono + HQ stereo play; with the level-2 channel allocation the broadcast showed as "Unknown", with the stereo pair at BIS 2/3 it could not be subscribed |
 | 2026-10-20 | Two subgroups (SQ + HQ) in one BIG | 24_2_1 mono + 48_6_1 stereo (3 BIS) and 24_2_1 stereo + 48_6_1 / 48_4_1 stereo (4 BIS): 2–5 min `RUN`, underrun/ovf/lost/senderr 0, PBA with SQ and HQ; PC receives all BIS, latency per BIS measured (see Latency); single-subgroup regression 24_2_1 mono 40.7 ms |
 | 2026-10-20 | BIG airtime | controller rejects 3 BIS × 155 B at RTN 4 and 4 BIS × 155 B at RTN 2 (`Unsupported Value`), accepts 4 BIS × 120 B at RTN 2 and 4 BIS × 155 B at RTN 1 |
 | 2026-10-20 | Encoder load, two subgroups | 3 BIS (48_6_1): max. 7.2–7.8 ms per 10 ms; 4 BIS (48_6_1): mean 7.7 ms, max. 8.3–9.7 ms; free heap 95 / 86 KB |

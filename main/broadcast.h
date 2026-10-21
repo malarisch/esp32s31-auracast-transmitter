@@ -23,6 +23,7 @@ typedef struct {
     uint8_t bis_count;     /* 1 or 2 */
     uint32_t rate;         /* LC3 sample rate: 16000, 24000 or 48000 */
     uint16_t sdu_len;      /* octets per LC3 frame (40/60/100/120/155) */
+    uint16_t context;      /* streaming context */
 } broadcast_subgroup_t;
 
 /* Runs in the ISO task: only notify, never block */
@@ -50,7 +51,7 @@ bool broadcast_streaming(void);
 /* Total number of BIS in the BIG (1..BROADCAST_MAX_BIS) */
 uint8_t broadcast_stream_count(void);
 
-/* Subgroups: 1 (SQ or HQ alone) or 2 (SQ first, then HQ) */
+/* Subgroups in BIG order: 1 (SQ or HQ alone) or 2 (a stereo subgroup first, otherwise SQ first) */
 uint8_t broadcast_subgroup_count(void);
 const broadcast_subgroup_t *broadcast_subgroup(uint8_t idx);
 

@@ -265,7 +265,7 @@ static esp_err_t source_create(void)
         if (err) {
             ESP_LOGW(TAG, "subgroup %d: removing the channel allocation failed, err %d", g, err);
         }
-        const uint16_t context = g == 0 ? s_cfg.context : s_cfg.hq_context;
+        const uint16_t context = sg->context;
         err = esp_ble_audio_codec_cfg_meta_set_stream_context(codec, (esp_ble_audio_context_t)context);
         if (err) {
             ESP_LOGE(TAG, "subgroup %d: setting the streaming context 0x%04x failed, err %d", g, context, err);
@@ -399,12 +399,23 @@ esp_err_t broadcast_configure(const ctrl_config_t *cfg)
     s_cfg = *cfg;
     s_sub_count = 0;
     s_stream_count = 0;
-    const uint8_t presets[MAX_SUBGROUPS] = {cfg->preset, cfg->hq_preset};
-    const uint8_t channels[MAX_SUBGROUPS] = {cfg->channels, cfg->hq_channels};
+    uint8_t presets[MAX_SUBGROUPS] = {cfg->preset, cfg->hq_preset};
+    uint8_t channels[MAX_SUBGROUPS] = {cfg->channels, cfg->hq_channels};
+    uint16_t contexts[MAX_SUBGROUPS] = {cfg->context, cfg->hq_context};
+    /*
+     * A stereo subgroup goes first, so its BIS pair is BIS 1 and 2: real receivers (hearing-aid class and
+     * Sennheiser) synchronised to a stereo pair at BIS 2 and 3 failed, while the same pair at 1 and 2 works.
+     */
+    if (cfg->hq_preset != AURA_PRESET_NONE && cfg->hq_channels == AURA_CH_STEREO && cfg->channels != AURA_CH_STEREO) {
+        presets[0] = cfg->hq_preset; presets[1] = cfg->preset;
+        channels[0] = cfg->hq_channels; channels[1] = cfg->channels;
+        contexts[0] = cfg->hq_context; contexts[1] = cfg->context;
+    }
     for (int g = 0; g < MAX_SUBGROUPS; g++) {
         if (presets[g] == AURA_PRESET_NONE) {
             break;
         }
+        s_sub[g].context = contexts[g];
         broadcast_subgroup_t *sg = &s_sub[g];
         sg->preset = presets[g];
         sg->channels = channels[g];
@@ -471,8 +482,7 @@ esp_err_t broadcast_start(broadcast_tick_cb_t tick, void *arg)
     for (int g = 0; g < s_sub_count; g++) {
         ESP_LOGI(TAG, "subgroup %d: preset=%s channels=%s bis=%u..%u sdu=%u context=0x%04x", g,
                  s_preset_names[s_sub[g].preset], s_channel_names[s_sub[g].channels], s_sub[g].first_bis,
-                 s_sub[g].first_bis + s_sub[g].bis_count - 1, s_sub[g].sdu_len,
-                 g == 0 ? s_cfg.context : s_cfg.hq_context);
+                 s_sub[g].first_bis + s_sub[g].bis_count - 1, s_sub[g].sdu_len, s_sub[g].context);
     }
     return ESP_OK;
 }

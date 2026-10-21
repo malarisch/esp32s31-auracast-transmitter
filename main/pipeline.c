@@ -173,7 +173,8 @@ static void source_init(void)
     for (int i = 0; i < s_nbis; i++) {
         const uint32_t rate = broadcast_bis_rate(i);
         /* 440 Hz on the first BIS of a subgroup, 880 Hz on its second (right) one */
-        const broadcast_subgroup_t *sg = s_dual && i >= s_sg[1]->first_bis ? s_sg[1] : s_sg[0];
+        const broadcast_subgroup_t *sg =
+            s_dual && i >= s_sg[1]->first_bis && i < s_sg[1]->first_bis + s_sg[1]->bis_count ? s_sg[1] : s_sg[0];
         const bool second = i == sg->first_bis + 1;
         s_synth_len[i] = rate / 40;
         for (uint32_t k = 0; k < s_synth_len[i]; k++) {
@@ -718,6 +719,12 @@ static void encoder_task(void *arg)
     s_dual = broadcast_subgroup_count() == 2;
     s_sg[0] = broadcast_subgroup(0);
     s_sg[1] = broadcast_subgroup(1);
+    if (s_dual && s_sg[0]->rate == 48000) {
+        /* s_sg[0] is the SQ (decimated) subgroup, s_sg[1] the 48 kHz one, whatever their BIG order */
+        const broadcast_subgroup_t *t = s_sg[0];
+        s_sg[0] = s_sg[1];
+        s_sg[1] = t;
+    }
     if (s_nbis == 0 || s_nbis > BROADCAST_MAX_BIS || s_sg[0] == NULL || (s_dual && s_sg[1] == NULL) ||
         encoders_open() != ESP_OK) {
         ESP_LOGE(TAG, "encoder setup failed (%u BIS)", s_nbis);
